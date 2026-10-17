@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "enabled": true,
+  "minVersion": "",
+  "pwVer": 1792243966,
+  "kdf": {
+    "salt": "OQ3vs72DluZOdl2OH4IDrQ==",
+    "iter": 600000
+  },
+  "payloadVer": "3a175d85f74d",
+  "graceDays": 3,
+  "msg": "Liên hệ với admin"
+}
