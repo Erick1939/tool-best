@@ -2,12 +2,12 @@
   "v": 1,
   "enabled": true,
   "minVersion": "",
-  "pwVer": 1792243966,
+  "pwVer": 1792565048,
   "kdf": {
-    "salt": "OQ3vs72DluZOdl2OH4IDrQ==",
+    "salt": "1yiSid5FdOfMUU4w1549zA==",
     "iter": 600000
   },
-  "payloadVer": "3a175d85f74d",
+  "payloadVer": "3d3bc0294d75",
   "graceDays": 3,
-  "msg": "Liên hệ với admin"
+  "msg": ""
 }

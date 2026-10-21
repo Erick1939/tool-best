@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         800BEST - Thống kê tổng quan & Shipper (bản chia sẻ)
 // @namespace    local.800best.report.share
-// @version      3.15.1
-// @description  Dashboard hub: tỷ lệ quét giao, POD2400, backlog, tách TikTok Shop, tiến độ từng shipper; lưu lịch sử theo ngày để xem tuần/tháng; tab ANM tự lưu bản chụp theo mốc giờ cố định (10:30, 13:30, 15:30, 18:30, 23:30) để so sánh đúng giờ với hôm qua/tuần trước; xuất Excel. v3.9: bảng xếp hạng thi đua có vương miện (POD2400, POD TikTok, Giao thành công, Tỷ lệ ODR), Backlog 5 ngày, giờ đơn giao thành công đầu tiên, phân tích nguyên nhân tăng/giảm POD (ship, sản lượng, thời tiết), bỏ tab Lịch sử. v3.11: khung COD ship nộp tiền thay biểu đồ 7 ngày (theo khung giờ, cảnh báo ship nộp 0đ hoặc dưới 50%, sao chép gửi nhóm). v3.10: tiêu đề giữa, bảng xếp hạng gọn thêm xu hướng 7 ngày / cần thêm để đạt mục tiêu / chưa quét giao / DM làm, dự báo POD cuối ngày bằng AI (công tắc dưới bảng, nhập khóa API ở Cài đặt).
+// @version      3.31.1
+// @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ.
 // @match        https://v9.800best.com/sea-web/*
 // @run-at       document-start
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
@@ -34,10 +34,12 @@
     hist: new Map(), histReady: false, histErr: '', pending: null, lastSaved: null,
     hv: { office: '', mode: 'trend', preset: 'd30', from: '', to: '', group: 'day', cmpDate: '', ssort: { key: 'rateTrip', dir: -1 } },
     anm: { sel: null, base: '', cmp: 'slot2', slot: '', lastAuto: 0, authErr: '', rankKey: 'pod', trendKey: 'pod', hide: new Set(), open: '', loading: null, results: [], detail: '' },
-    cod: { by: {}, meta: {}, err: {}, warn: {}, running: false, at: 0, open: false, copied: 0, zero: '', zcopied: 0 },   // COD ship nộp tiền (chỉ giữ trong bộ nhớ, không lưu)
-    ai: { key: '', model: 'claude-haiku-5-5', keyOk: false, on: false, prompt: '', res: null, running: false, err: '', test: { busy: false } },   // dự báo POD bằng AI
+    cod: { by: {}, meta: {}, err: {}, warn: {}, running: false, at: 0, open: false, copied: 0, zero: '', zcopied: 0, ucopied: 0 },   // COD ship nộp tiền (chỉ giữ trong bộ nhớ, không lưu)
+    sh: { map: new Map(), ready: false, run: { w: false, m: false }, prog: { w: '', m: '' }, res: {}, msg: '', err0: '', hide: false },   // cột tỉ lệ giao tuần/tháng của bảng Shipper
+    pick: { map: new Map(), ready: false, run: false, prog: '', msg: '', err: {}, err0: '', tried: {}, date: '', cmp: 'both', off: '', shop: '', top: false, at: 0, mon: { run: false, done: 0, total: 0, office: '' } },   // tab Pickup-sale
     wx: { data: null, at: 0, err: '', loading: false, key: '' },   // thời tiết (lượng mưa theo giờ); on/lat/lon nạp từ cấu hình
     sign: null,                // chẩn đoán trường giờ ký nhận: { keys, okN, signN }
+    kb: { map: new Map(), ready: false, running: false, msg: '', err: '', tried: {}, fail: {}, diag: {}, today: new Map(), todayTried: {}, todayRun: false, want: [], sg: new Map() },   // số liệu so sánh hôm qua / tuần trước từ Kanban
     snap: { list: [], idx: new Map(), ready: false, running: false, tries: {}, last: {}, err: '', timer: 0 },   // bản chụp theo mốc giờ của tab ANM
     fast: true, apiHdr: (window.__b8shdr = window.__b8shdr || {}), sites: {}, apiNote: '', ownerSiteId: null,   // tải nhanh bằng API (chỉ ANM): tiêu đề xác thực lấy từ chính trang
     th: {},                    // ngưỡng màu/cảnh báo do người dùng chỉnh (ghi đè mặc định)
@@ -53,7 +55,7 @@
    *   enabled (bật/tắt), minVersion, pwVer (đổi số này = mọi người phải nhập lại), kdf (salt, iter), payloadVer, graceDays, msg.
    * Chỉ đọc 2 file công khai trên GitHub; KHÔNG gửi bất kỳ dữ liệu nào của người dùng đi đâu.
    * ------------------------------------------------------------------ */
-  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.15.1', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
+  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.31.1', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
   const lkS = { st: 'init', msg: '', busy: false, status: null, fails: 0, wait: 0, diag: '', checkedAt: 0 };   // st: init | checking | locked | blocked | error | open
   const lkNoop = () => undefined, lkResolved = () => Promise.resolve();
   const lkB64d = s => Uint8Array.from(atob(String(s)), c => c.charCodeAt(0));
@@ -226,18 +228,16 @@
   let loadWeather = lkNoop;
   let renderWxInfo = lkNoop;
   let onEnterAnm = lkEnter;
-  let loadAi = lkNoop;
-  let saveAi = lkNoop;
-  let renderAiInfo = lkNoop;
-  let aiSubmitKey = lkNoop;
-  let aiClearKey = lkNoop;
+  let anmOffices = lkNoop;
+  let anmSel = lkNoop;
+  let anmData = lkNoop;
   let fitAnm = lkNoop;
   let renderAnm = lkRenderAnm;
   let onAnmClick = lkClick;
   let onAnmChange = lkNoop;
   let addAnmSheets = lkNoop;
-  function lkBind(o) { loadSnaps = o.loadSnaps; loadSnapLog = o.loadSnapLog; snapTick = o.snapTick; snapBadge = o.snapBadge; loadWeather = o.loadWeather; renderWxInfo = o.renderWxInfo; onEnterAnm = o.onEnterAnm; loadAi = o.loadAi; saveAi = o.saveAi; renderAiInfo = o.renderAiInfo; aiSubmitKey = o.aiSubmitKey; aiClearKey = o.aiClearKey; fitAnm = o.fitAnm; renderAnm = o.renderAnm; onAnmClick = o.onAnmClick; onAnmChange = o.onAnmChange; addAnmSheets = o.addAnmSheets; }
-  function lkUnbind() { loadSnaps = lkResolved; loadSnapLog = lkNoop; snapTick = lkNoop; snapBadge = lkNoop; loadWeather = lkNoop; renderWxInfo = lkNoop; onEnterAnm = lkEnter; loadAi = lkNoop; saveAi = lkNoop; renderAiInfo = lkNoop; aiSubmitKey = lkNoop; aiClearKey = lkNoop; fitAnm = lkNoop; renderAnm = lkRenderAnm; onAnmClick = lkClick; onAnmChange = lkNoop; addAnmSheets = lkNoop; }
+  function lkBind(o) { loadSnaps = o.loadSnaps; loadSnapLog = o.loadSnapLog; snapTick = o.snapTick; snapBadge = o.snapBadge; loadWeather = o.loadWeather; renderWxInfo = o.renderWxInfo; onEnterAnm = o.onEnterAnm; anmOffices = o.anmOffices; anmSel = o.anmSel; anmData = o.anmData; fitAnm = o.fitAnm; renderAnm = o.renderAnm; onAnmClick = o.onAnmClick; onAnmChange = o.onAnmChange; addAnmSheets = o.addAnmSheets; }
+  function lkUnbind() { loadSnaps = lkResolved; loadSnapLog = lkNoop; snapTick = lkNoop; snapBadge = lkNoop; loadWeather = lkNoop; renderWxInfo = lkNoop; onEnterAnm = lkEnter; anmOffices = lkNoop; anmSel = lkNoop; anmData = lkNoop; fitAnm = lkNoop; renderAnm = lkRenderAnm; onAnmClick = lkClick; onAnmChange = lkNoop; addAnmSheets = lkNoop; }
 
   /* ------------------------------------------------------------------ *
    * Hàm thuần (không đụng DOM) – có test riêng
@@ -488,7 +488,7 @@
   }
 
   // ---- Tính dashboard ----
-  function computeDashboard({ orders, emp, tiktok, statusMap, now, rules }) {
+  function computeDashboard({ orders, emp, tiktok, statusMap, now, rules, skip }) {
     const H = orders.headers.map(h => String(h ?? '').normalize('NFC')), wb = orders.wbCol, rows = orders.rows;
     const stCol = colBy(H, /trạng thái/i);
     const scCol = colBy(H, /người quét|nhân viên|shipper|người phát|giao nhận/i);
@@ -507,7 +507,7 @@
     const bl = { total: 0, wait: 0, fail: 0, unscanned: 0, d5: 0 };
     let odr = 0, firstOk = null;
     const odr2 = { due: 0, ok: 0 };
-    const mkAgg = () => ({ total: 0, ok: 0, unscanned: 0, newTotal: 0, newOk: 0 });
+    const mkAgg = () => ({ total: 0, ok: 0, unscanned: 0, newTotal: 0, newOk: 0, newUns: 0 });
     const all = mkAgg(), tt = mkAgg(), sme = mkAgg();
     const byCode = new Map(), byName = new Map(), stats = [];
 
@@ -530,7 +530,7 @@
       for (const a of (isTT ? [all, tt] : [all, sme])) {
         a.total++;
         if (cat === 'ok') a.ok++; else if (cat === 'unscanned') a.unscanned++;
-        if (isNew) { a.newTotal++; if (cat === 'ok') a.newOk++; }
+        if (isNew) { a.newTotal++; if (cat === 'ok') a.newOk++; else if (cat === 'unscanned') a.newUns++; }
       }
       // Giờ đơn giao thành công đầu tiên trong ngày (đơn thành công có giờ ký nhận là hôm nay)
       if (tCol >= 0 && cat === 'ok' && isToday(r[tCol], now)) { const mm = minOfDay(r[tCol]); if (mm !== null && (firstOk === null || mm < firstOk)) firstOk = mm; }
@@ -563,6 +563,7 @@
     const workersEstimated = !W;
     let nWork = W ? W.list.length : stats.filter(o => o.total > 0).length;   // với W: tính lại sau khi lọc ship đủ điều kiện
     const DM = dmRulesOf(rules), dmWhy = { dept: 0, late: 0, few: 0 };
+    let skipped = 0;
 
     const used = new Set();
     let shippers;
@@ -591,11 +592,13 @@
           return true;
         });
       }
+      if (typeof skip === 'function') { const n0 = shippers.length; shippers = shippers.filter(s => !skip(s.name)); skipped = n0 - shippers.length; }
       shippers.forEach(s => { delete s._row; });
       nWork = shippers.length;
     } else {
       shippers = stats.filter(o => o.total > 0).map(o => ({ name: o.label, matched: true, scanned: o.total,
         ok: o.ok, ttTotal: o.ttTotal, ttOk: o.ttOk }));
+      if (typeof skip === 'function') shippers = shippers.filter(s => !skip(s.name));
     }
     shippers.forEach(s => { s.rateTrip = ratio(s.ok, s.scanned); s.rateTT = ratio(s.ttOk, s.ttTotal); });
 
@@ -611,7 +614,7 @@
     if (scCol < 0) notes.push('Không thấy cột “Người quét” trong bảng đơn nên chưa tách được theo shipper.');
     if (W && W.note) notes.push(W.note);
     if (W && DM.on) {
-      const hid = W.list.length - shippers.length;
+      const hid = W.list.length - skipped - shippers.length;
       if (!(W.deptCol >= 0 && W.list.some(r => String(r[W.deptCol] ?? '').trim() !== ''))) notes.push('Không thấy cột “Chức vụ” trong bảng nhân viên nên chưa lọc theo chức vụ.');
       if (hid > 0) notes.push(`Đã ẩn ${hid}/${W.list.length} ship không đủ điều kiện đi làm (${[dmWhy.dept ? `${dmWhy.dept} sai chức vụ` : '', dmWhy.late ? `${dmWhy.late} quét đầu sau ${DM.cutoff}` : '', dmWhy.few ? `${dmWhy.few} giao thành công dưới ${DM.minOk} đơn (cuối ngày)` : ''].filter(Boolean).join(', ')}).`);
     }
@@ -634,7 +637,8 @@
     }
 
     const card = a => ({
-      pod: ratio(a.newOk, a.newTotal), newOk: a.newOk, newTotal: a.newTotal,
+      pod: ratio(a.newOk, a.newTotal), newOk: a.newOk, newTotal: a.newTotal, newUns: a.newUns,
+      newScan: ratio(a.newTotal - a.newUns, a.newTotal),
       total: a.total, unscanned: a.unscanned, scanned: a.total - a.unscanned, ok: a.ok,
       scanRate: ratio(a.total - a.unscanned, a.total),
       perNV: nWork > 0 ? a.total / nWork : null,
@@ -647,6 +651,72 @@
       firstOk, hasTime: tCol >= 0,
       hasTT: tt.total > 0, nWork, workersEstimated, W, shippers, totals, notes, stCol, scCol, dmHidden: W ? W.list.length - shippers.length : 0
     };
+  }
+
+  // ---- v3.19: số liệu so sánh (hôm qua, tuần trước) tính từ danh sách đơn của API Kanban, cùng giờ chính xác đến phút ----
+  const KB_NONE = -99999, KB_F = { NEW: 1, TT: 2, D24: 4 };
+  const kbMs = v => { const t = Date.parse(String(v ?? '')); return Number.isFinite(t) ? t : null; };
+  const kbDay0 = date => Date.UTC(+date.slice(0, 4), +date.slice(5, 7) - 1, +date.slice(8, 10)) - 7 * 3600000;   // 00:00 giờ Việt Nam của ngày
+  // v3.20: giờ ký nhận (phút trong ngày) của các đơn thành công hôm nay, lấy từ bảng đơn của tool (không phụ thuộc Kanban)
+  function signMinsOf(orders, statusMap, now) {
+    try {
+      const H = orders.headers.map(h => String(h ?? '').normalize('NFC')), tCol = colBy(H, /giờ giao thành công/i), stCol = colBy(H, /trạng thái/i);
+      if (tCol < 0 || stCol < 0) return null;
+      const out = [];
+      for (const r of orders.rows) if (classify(r[stCol], statusMap) === 'ok' && isToday(r[tCol], now)) { const m = minOfDay(r[tCol]); if (m !== null) out.push(m); }
+      return out.sort((a, b) => a - b);
+    } catch { return null; }
+  }
+  // Nén danh sách đơn của một ngày: mỗi đơn = [phút nhập kho, phút ký nhận, cờ, số thứ tự ship] (phút tính từ 00:00 giờ VN); không giữ mã vận đơn
+  function kbPack(items, tiktok, date) {
+    const d0 = kbDay0(date), ships = [], idx = new Map(), P = [];
+    const mn = ms => ms === null ? KB_NONE : Math.round((ms - d0) / 60000);
+    for (const x of (items || [])) {
+      if (!x || typeof x !== 'object') continue;
+      const name = String(x.smallManName ?? '').trim();
+      let si = -1;
+      if (name) { si = idx.has(name) ? idx.get(name) : -1; if (si < 0) { si = ships.length; idx.set(name, si); ships.push(name); } }
+      const f = (Number(x.isTodaySdisp) === 1 ? KB_F.NEW : 0) | (isTikTok(x.billCode, tiktok) ? KB_F.TT : 0) | (Number(x.is2400PodSign) === 1 ? KB_F.D24 : 0);
+      P.push(mn(kbMs(x.endSiteArrTime)), x.isSign ? mn(kbMs(x.endSiteSignTime)) : KB_NONE, f, si);
+    }
+    return { ships, P };
+  }
+  // Số liệu cả ngày tính từ danh sách (để đối chiếu với số tổng của Kanban)
+  function kbDayCheck(E) {
+    const P = E.P; let all = 0, newN = 0, newOk = 0, ttNew = 0, ttOk = 0, ok = 0;
+    for (let i = 0; i < P.length; i += 4) {
+      all++; const f = P[i + 2], nw = f & KB_F.NEW;
+      if (P[i + 1] !== KB_NONE && P[i + 1] < 1440) ok++;
+      if (nw) { newN++; if (f & KB_F.D24) newOk++; if (f & KB_F.TT) { ttNew++; if (f & KB_F.D24) ttOk++; } }
+    }
+    return { all, newN, newOk, ttNew, ttOk, ok };
+  }
+  // Bản ghi giống bản chụp tại phút m của ngày (m >= 1440 là số cả ngày). Chỉ có số đơn/giao thành công/ship; không có số quét giao
+  function kbAt(E, m, rules, office, date) {
+    const P = E.P, fin = m >= 1440, lim = fin ? 1440 : m;
+    const all = { total: 0, unscanned: 0, ok: 0, newTotal: 0, newOk: 0, newUns: null }, tt = { total: 0, unscanned: 0, ok: 0, newTotal: 0, newOk: 0, newUns: null };
+    const sh = E.ships.map(() => ({ ok: 0, tt: 0, ft: null }));
+    let first = null;
+    for (let i = 0; i < P.length; i += 4) {
+      const arr = P[i], sg = P[i + 1], f = P[i + 2], si = P[i + 3];
+      if (!fin && arr !== KB_NONE && arr > m) continue;                  // chưa nhập kho tại thời điểm đó
+      const isNew = f & KB_F.NEW, isTT = f & KB_F.TT, signed = sg !== KB_NONE && sg <= lim, okNew = fin ? !!(f & KB_F.D24) : signed;
+      all.total++; if (isTT) tt.total++;
+      if (signed) { all.ok++; if (isTT) tt.ok++; if (si >= 0) { sh[si].ok++; if (isTT) sh[si].tt++; if (sh[si].ft === null || sg < sh[si].ft) sh[si].ft = sg; } if (first === null || sg < first) first = sg; }
+      if (isNew) { all.newTotal++; if (okNew) all.newOk++; if (isTT) { tt.newTotal++; if (okNew) tt.newOk++; } }
+    }
+    const DM = dmRulesOf(rules), cutDm = hmToMin(DM.cutoff), ships = [];
+    const skipK = shipSkipFn(office);
+    E.ships.forEach((n, i) => {
+      const h = sh[i]; if (!(h.ok > 0)) return;
+      if (skipK && skipK(n)) return;
+      if (DM.on) {
+        if (Number.isFinite(cutDm) && h.ft !== null && h.ft > cutDm) return;
+        if (fin && DM.minOk > 0 && h.ok < DM.minOk) return;
+      }
+      ships.push({ n, sc: 0, ok: h.ok, tt: h.tt, tk: 0, sg: h.ok, ft: h.ft });
+    });
+    return { office, date, id: `${office}|${date}`, savedAt: '', v: 1, verified: true, all, tt, backlog: null, odrTT: null, odr2: null, firstOk: first, nWork: ships.length, nScan: null, workersEstimated: true, ships, rb: 'kb', rbAt: '', fin: E.fin || null };
   }
 
   // Thẻ chỉ số: [nhãn, giá trị, kiểu, màu]; thẻ không có dữ liệu bị bỏ khi hiển thị
@@ -663,10 +733,10 @@
           bl ? [['Chờ duyệt', bl.wait], ['Giao thất bại', bl.fail], ['Nhập kho chưa quét phát', bl.unscanned]] : null]
       ],
       tts: [
-        ['Tổng đơn TTS', t.total, 'int', 'pink'], ['Tỷ lệ quét TTS', t.scanRate, 'pct', 'green'],
+        ['Tổng đơn TikTok', t.total, 'int', 'pink'], ['Tỷ lệ quét TikTok', t.scanRate, 'pct', 'green'],
         ['TikTok POD2400', t.pod, 'pct', 'amber', [['Giao thành công', t.newOk], ['Tổng đơn mới hôm nay', t.newTotal]]],
-        ['TTS chưa quét giao', t.unscanned, 'int', 'purple'],
-        ['GTC chuyến TTS', t.gtcTrip, 'pct', 'teal'], ['GTC Total TTS', t.gtcTotal, 'pct', 'orange'],
+        ['TikTok chưa quét giao', t.unscanned, 'int', 'purple'],
+        ['GTC chuyến TikTok', t.gtcTrip, 'pct', 'teal'], ['GTC Total TikTok', t.gtcTotal, 'pct', 'orange'],
         ['TikTok đến hạn ODR', e.odrTT, 'int', 'red']
       ]
     };
@@ -680,9 +750,9 @@
       { k: 'rateTrip', label: '% GTC chuyến', group: 'gh', kind: 'pct', good: 'high', tip: 'GTC / Đã quét giao' }
     ];
     if (c.hasTT) {
-      cols.push({ k: 'ttTotal', label: 'Tổng đơn TTS', group: 'tt', kind: 'int', tip: 'Số đơn TikTok shipper đã quét giao' });
-      cols.push({ k: 'ttOk', label: 'GTC TTS', group: 'tt', kind: 'int', tip: 'Đơn TikTok giao thành công' });
-      cols.push({ k: 'rateTT', label: '% GTC TTS', group: 'tt', kind: 'pct', good: 'high', tip: 'GTC TTS / Tổng đơn TTS' });
+      cols.push({ k: 'ttTotal', label: 'Tổng đơn TikTok', group: 'tt', kind: 'int', tip: 'Số đơn TikTok shipper đã quét giao' });
+      cols.push({ k: 'ttOk', label: 'GTC TikTok', group: 'tt', kind: 'int', tip: 'Đơn TikTok giao thành công' });
+      cols.push({ k: 'rateTT', label: '% GTC TikTok', group: 'tt', kind: 'pct', good: 'high', tip: 'GTC TikTok / Tổng đơn TikTok' });
     }
     return cols;
   }
@@ -700,6 +770,13 @@
   }
 
   // ---- Lịch sử theo ngày ----
+  // KPI POD2400: khu vực và từng bưu cục; đạt = xanh, thấp hơn dưới 15 điểm = vàng, từ 15 điểm = đỏ
+  let KPI_REGION_NAME = '', KPI_REGION = NaN; const KPI_GAP = 15;   // bản chia sẻ: không có KPI sẵn, người dùng tự nhập ở Cài đặt (thanh KPI ẩn khi chưa nhập)
+  let KPI_OFFICE = {};
+  try { const k = JSON.parse(localStorage.getItem('b8s_kpi') || 'null'); if (k && typeof k === 'object') { KPI_REGION_NAME = String(k.n || ''); KPI_REGION = Number.isFinite(k.r) ? k.r : NaN; if (k.o && typeof k.o === 'object') for (const [n, v] of Object.entries(k.o)) if (Number.isFinite(v)) KPI_OFFICE[n] = v; } } catch { /* bỏ qua */ }
+  const kpiOff = o => { if (Number.isFinite(KPI_OFFICE[o])) return KPI_OFFICE[o]; const p = plain(o), k = Object.keys(KPI_OFFICE).find(x => plain(x) === p); return k ? KPI_OFFICE[k] : NaN; };
+  const kpiLevel = (v, k) => !Number.isFinite(v) || !Number.isFinite(k) ? '' : v >= k ? 'g' : v >= k - KPI_GAP ? 'a' : 'r';
+  const kpiNeed = (pair, k) => Array.isArray(pair) && Number.isFinite(pair[0]) && pair[1] > 0 ? Math.max(0, Math.ceil(k / 100 * pair[1] - pair[0] - 1e-9)) : null;
   const OFFICES = [];   // bản chia sẻ: không có bưu cục sẵn, thêm ở Cài đặt
   const WEEKDAY = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
   const sameOffice = (a, b) => { const x = plain(a), y = plain(b); return !!x && !!y && (x === y || x.includes(y) || y.includes(x)); };
@@ -744,8 +821,15 @@
 
   const nz = v => (typeof v === 'number' && Number.isFinite(v)) ? v : 0;
   const nn = v => (typeof v === 'number' && Number.isFinite(v)) ? v : null;
-  const cntOf = c => { c = c || {}; return { total: nz(c.total), unscanned: nz(c.unscanned), ok: nz(c.ok), newTotal: nz(c.newTotal), newOk: nz(c.newOk) }; };
+  const cntOf = c => { c = c || {}; return { total: nz(c.total), unscanned: nz(c.unscanned), ok: nz(c.ok), newTotal: nz(c.newTotal), newOk: nz(c.newOk), newUns: nn(c.newUns) }; };
   const blOf = b => b ? { total: nz(b.total), wait: nz(b.wait), fail: nz(b.fail), unscanned: nz(b.unscanned), d5: nn(b.d5) } : null;
+  // Ship không tính vào danh sách ship của bưu cục (cấu hình trong code, không hiển thị ra giao diện): [bưu cục, tên ship]
+  const HIDE_SHIPS = [];
+  function shipSkipFn(office) {
+    const o = plain(canonOffice(office, OFFICES) || office || '');
+    const names = HIDE_SHIPS.filter(h => plain(h[0]) === o).map(h => normName(h[1]));
+    return names.length ? (label => names.includes(shipKeys(label).name)) : null;
+  }
   const shipsOf = list => (Array.isArray(list) ? list : []).map(s => ({
     n: String(s.n ?? s.name ?? '').trim().slice(0, 80), sc: nz(s.sc ?? s.scanned), ok: nz(s.ok),
     tt: nz(s.tt ?? s.ttTotal), tk: nz(s.tk ?? s.ttOk), sg: nn(s.sg ?? s.signed), ft: nn(s.ft)
@@ -756,14 +840,15 @@
     if (!r || typeof r !== 'object') return null;
     const office = String(r.office ?? '').trim(), date = String(r.date ?? '');
     if (!office || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
-    const ships = shipsOf(r.ships);
+    const skipF = shipSkipFn(office), ships = shipsOf(r.ships).filter(x => !skipF || !skipF(x.n));
     // Số shipper có quét giao hàng (đã quét phát ít nhất 1 đơn); bản ghi cũ chưa có thì suy ra từ danh sách shipper
     const nScan = nn(r.nScan) ?? (ships.length ? ships.filter(x => x.sc > 0).length : null);
     return {
       id: `${office}|${date}`, office, date, savedAt: String(r.savedAt ?? ''), v: 1, verified: !!r.verified,
       all: cntOf(r.all), tt: cntOf(r.tt), backlog: blOf(r.backlog), odrTT: nn(r.odrTT),
       odr2: (r.odr2 && typeof r.odr2 === 'object') ? { due: nz(r.odr2.due), ok: nz(r.odr2.ok) } : null, firstOk: nn(r.firstOk),
-      nWork: nz(r.nWork), nScan, workersEstimated: !!r.workersEstimated, ships
+      nWork: nz(r.nWork), nScan, workersEstimated: !!r.workersEstimated, ships,
+      rb: r.rb ? String(r.rb).slice(0, 4) : '', rbAt: r.rbAt ? String(r.rbAt) : ''   // rb: 're' dựng lại từ danh sách đơn, 'hi' từ danh sách đơn của Kanban
     };
   }
 
@@ -806,9 +891,10 @@
   function aggregate(recs) {
     const dates = [...new Set(recs.map(r => r.date))].sort(), days = dates.length;
     const A = { total: 0, unscanned: 0, ok: 0, newTotal: 0, newOk: 0 }, T = { ...A };
-    let bl = 0, blN = 0, od = 0, odN = 0, wk = 0, sn = 0, snN = 0, b5 = 0, b5N = 0, o2d = 0, o2o = 0, o2N = 0, fo = null;
+    let nuU = 0, nuT = 0, bl = 0, blN = 0, od = 0, odN = 0, wk = 0, sn = 0, snN = 0, b5 = 0, b5N = 0, o2d = 0, o2o = 0, o2N = 0, fo = null;
     for (const r of recs) {
       for (const k of Object.keys(A)) { A[k] += nz(r.all[k]); T[k] += nz(r.tt[k]); }
+      if (Number.isFinite(r.all.newUns)) { nuU += r.all.newUns; nuT += nz(r.all.newTotal); }   // bản ghi cũ chưa có số này thì bỏ qua
       if (r.backlog) { bl += r.backlog.total; blN++; if (Number.isFinite(r.backlog.d5)) { b5 += r.backlog.d5; b5N++; } }
       if (r.odr2) { o2d += r.odr2.due; o2o += r.odr2.ok; o2N++; }
       if (Number.isFinite(r.firstOk)) fo = fo === null ? r.firstOk : Math.min(fo, r.firstOk);
@@ -819,17 +905,18 @@
     const lastDate = dates[days - 1] || '', last = recs.filter(r => r.date === lastDate);
     const lastBl = last.some(r => r.backlog) ? last.reduce((a, r) => a + (r.backlog ? r.backlog.total : 0), 0) : null;
     const lastOd = last.some(r => Number.isFinite(r.odrTT)) ? last.reduce((a, r) => a + (Number.isFinite(r.odrTT) ? r.odrTT : 0), 0) : null;
-    return { days, A, T, bl: blN ? bl : null, od: odN ? od : null, wk, sn: snN ? sn : null, lastBl, lastOd, firstDate: dates[0] || '', lastDate, b5: b5N ? b5 : null, od2: o2N ? [o2o, o2d] : null, fo };
+    return { days, A, T, bl: blN ? bl : null, od: odN ? od : null, wk, sn: snN ? sn : null, lastBl, lastOd, firstDate: dates[0] || '', lastDate, b5: b5N ? b5 : null, od2: o2N ? [o2o, o2d] : null, fo, nuU, nuT, rb: recs.some(r => r.rb) };
   }
   function metricsOf(g) {
     const d = g.days || 0, A = g.A, T = g.T;
     const avg = v => (v === null || v === undefined || !d) ? null : v / d;
     return {
-      days: d, total: avg(A.total), unscanned: avg(A.unscanned),
-      scanRate: ratio(A.total - A.unscanned, A.total),
+      days: d, total: avg(A.total), unscanned: g.rb ? null : avg(A.unscanned),   // mốc dựng lại: không biết đơn nào đã quét vào lúc đó
+      scanRate: g.rb ? null : ratio(A.total - A.unscanned, A.total),
       pod: ratio(A.newOk, A.newTotal), podN: [A.newOk, A.newTotal],
+      newScan: g.nuT > 0 && !g.rb ? ratio(g.nuT - g.nuU, g.nuT) : null,
       podTT: ratio(T.newOk, T.newTotal), podTTN: [T.newOk, T.newTotal],
-      gtcTrip: ratio(A.ok, A.total - A.unscanned), gtcTotal: ratio(A.ok, A.total), gtcN: [A.ok, A.total],
+      gtcTrip: g.rb ? null : ratio(A.ok, A.total - A.unscanned), gtcTotal: ratio(A.ok, A.total), gtcN: [A.ok, A.total],
       backlog: avg(g.bl), backlogLast: g.lastBl, odr: avg(g.od), odrLast: g.lastOd, nWork: avg(g.wk), nScan: avg(g.sn),
       backlog5: avg(g.b5), odrPct: g.od2 ? ratio(g.od2[0], g.od2[1]) : null, odrPctN: g.od2, firstOk: g.fo
     };
@@ -939,9 +1026,9 @@
     { k: 'pod', label: 'POD2400', group: 'Giao thành công', kind: 'pct' },
     { k: 'gtcTotal', label: 'GTC Total', group: 'Giao thành công', kind: 'pct' },
     { k: 'backlog', label: 'Backlog 3 ngày', group: 'Tồn đọng', kind: 'avg', low: true },
-    { k: 'podTT', label: 'POD TTS', group: 'TikTok Shop', kind: 'pct' },
-    { k: 'gtcTT', label: 'GTC TTS', group: 'TikTok Shop', kind: 'pct' },
-    { k: 'odr', label: 'TTS đến hạn ODR', group: 'TikTok Shop', kind: 'avg', low: true },
+    { k: 'podTT', label: 'POD TikTok', group: 'TikTok Shop', kind: 'pct' },
+    { k: 'gtcTT', label: 'GTC TikTok', group: 'TikTok Shop', kind: 'pct' },
+    { k: 'odr', label: 'TikTok đến hạn ODR', group: 'TikTok Shop', kind: 'avg', low: true },
     { k: 'odrPct', label: 'Tỷ lệ ODR', group: 'TikTok Shop', kind: 'pct' },
     { k: 'backlog5', label: 'Backlog 5 ngày', group: 'Tồn đọng', kind: 'avg', low: true }
   ];
@@ -967,8 +1054,17 @@
     m.perNV = g.wk > 0 ? g.A.total / g.wk : null;
     m.gtcTT = ratio(g.T.ok, g.T.total);
     m.n = recs.length;
+    // Bản ghi so sánh dựng từ Kanban: các chỉ số quét giao / GTC chỉ có số CUỐI NGÀY (lấy từ số tổng của Kanban), tính lại từ tổng
+    if (recs.every(r => r && r.fin)) {
+      let T = 0, U = 0, O = 0, NT = 0, NU = 0, uOk = true, nOk = true;
+      for (const r of recs) { const f = r.fin; T += nz(f.total); O += nz(f.ok); NT += nz(f.newTotal); if (Number.isFinite(f.unscanned)) U += f.unscanned; else uOk = false; if (Number.isFinite(f.newUns)) NU += f.newUns; else nOk = false; }
+      m.unscanned = uOk ? U / Math.max(1, m.days) : null; m.scanRate = uOk ? ratio(T - U, T) : null; m.gtcTrip = uOk ? ratio(O, T - U) : null;
+      m.gtcTotal = ratio(O, T); m.gtcN = [O, T]; m.newScan = nOk ? ratio(NT - NU, NT) : null; m.fin = true;
+    }
     return m;
   }
+  // Các chỉ số quét giao / GTC chỉ so với số cuối ngày chốt (không so theo giờ, không có mũi tên)
+  const FIN_KEYS = ['scanRate', 'unscanned', 'newScan', 'gtcTrip', 'gtcTotal'];
   function buildAlerts(rows, user) {
     const out = [], lab = k => ANM_METRICS.find(x => x.k === k).label;
     for (const r of rows) {
@@ -989,8 +1085,6 @@
           const d = r.cur[k] - r.prev[k];
           if (!red.has(k) && Number.isFinite(d) && d <= -3) out.push({ level: 'a', office: r.office, text: `${lab(k)} giảm ${round1(-d).toLocaleString('vi-VN')} điểm so với kỳ trước` });
         }
-        const db = r.cur.backlog - r.prev.backlog;
-        if (!red.has('backlog') && Number.isFinite(db) && db >= 20) out.push({ level: 'a', office: r.office, text: `Backlog tăng ${fmtAvg(db)} đơn so với kỳ trước` });
       }
       if (r.recs && r.recs.some(x => !x.verified)) out.push({ level: 'a', office: r.office, text: 'Có số liệu chưa đối chiếu được với trang gốc (dấu ⚠ trong Lịch sử).' });
     }
@@ -1003,7 +1097,7 @@
   }
 
   /* ---- Bản chụp theo mốc giờ (tab ANM) ---- */
-  const SNAP_SLOTS = ['10:30', '13:30', '15:30', '18:30', '23:30'];
+  const SNAP_SLOTS = ['23:30'];   // v3.19: chỉ còn mốc chốt cuối ngày (lưu số DM, giờ GTC đầu tiên của ngày)
   const SNAP_WINDOW_MIN = 15, SNAP_KEEP_DAYS = 90, SNAP_RETRY_MS = 170000, SNAP_MAX_TRY = 5;
   const slotMin = sl => { const m = /^(\d{2}):(\d{2})$/.exec(String(sl)); return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : NaN; };
   const minutesOf = d => d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
@@ -1030,8 +1124,8 @@
     const ships = base.ships.slice(0, 150).map(x => ({ n: x.n, sc: x.sc, ok: x.ok, tt: 0, tk: 0, sg: null, ft: x.ft }));
     return { ...base, id: `${base.office}|${base.date}|${slot}`, slot, runAt: String((r && r.runAt) ?? base.savedAt), ships };
   }
-  function buildSnap({ office, now, calc, verified, slot }) {
-    return normalizeSnap({ ...buildRecord({ office, now, calc, verified }), slot, runAt: now.toISOString() });
+  function buildSnap({ office, now, calc, verified, slot, rb, rbAt }) {
+    return normalizeSnap({ ...buildRecord({ office, now, calc, verified }), slot, runAt: now.toISOString(), rb, rbAt });
   }
   function snapsToIndex(list) {   // Map(bưu cục → Map('ngày|mốc' → bản chụp))
     const idx = new Map();
@@ -1071,77 +1165,178 @@
   }
 
   /* ---- Phân tích nguyên nhân POD2400 tăng/giảm so với hôm qua cùng mốc giờ ---- */
-  const RS_TH = { minDelta: 0.5, shipPct: 10, vol: 15, load: 10, backlog: 20, backlogPct: 10, late: 30, first: 30, rain: 2, rainGap: 1.5, shipRate: 20, shipMin: 15, top: 4 };
+  const RS_TH = { minDelta: 0.5, shipPct: 10, vol: 15, load: 10, late: 30, first: 30, rain: 2, rainGap: 1.5, shipRate: 20, shipMin: 15, top: 4, arrMin: 25, freshWin: 120, freshPct: 8, oldAbs: 15, oldPct: 15, ttShare: 8, ttPod: 10, ttMin: 15, shipDrop: 5, hold: 25, curveGap: 5, curveRel: 0.15, unscan: 10 };
   const shipLabel = n => (String(n ?? '').replace(/\s*\([^)]*\)\s*$/, '').trim() || String(n ?? '').trim());
   function shipMapOf(ships) {
     const m = new Map();
-    for (const x of (ships || [])) { const k = shipKeys(x.n), key = k.code || k.name || x.n; if (!m.has(key)) m.set(key, x); }
+    for (const x of (ships || [])) { const k = shipKeys(x.n), key = k.code || k.name || x.n; if (!m.has(key)) m.set(key, x); if (k.name && !m.has(k.name)) m.set(k.name, x); }   // cả mã lẫn tên: số liệu Kanban của hôm qua chỉ có tên ship
     return m;
   }
   const pct0 = v => `${Math.round(v)}%`;
-  // cur, yd: bản ghi (ngày hoặc bản chụp) của cùng một bưu cục; rain: { cur, yd } (mm) hoặc null
-  function buildReasons({ cur, yd, rain }) {
-    if (!cur || !yd) return { dir: 'none', delta: null, reasons: [], why: !cur ? 'Chưa có số liệu của kỳ đang xem.' : 'Chưa có bản lưu hôm qua cùng mốc giờ để so sánh.' };
+  // v3.20: thống kê từ danh sách đơn Kanban đã nén (kbPack) tại phút m, dùng chung một cách tính cho hôm nay và hôm qua
+  function kbStatsAt(E, m) {
+    const P = E.P, ships = new Map(), sg = [], arrNew = [];
+    let n = 0, newN = 0, newOk = 0, fresh = 0, old = 0, ttN = 0, ttOk = 0, smN = 0, smOk = 0;
+    for (let i = 0; i < P.length; i += 4) {
+      const arr = P[i], s = P[i + 1], f = P[i + 2], si = P[i + 3];
+      if (arr !== KB_NONE && arr > m) continue;                    // chưa nhập kho tại thời điểm đó
+      n++;
+      const signed = s !== KB_NONE && s <= m, isNew = !!(f & KB_F.NEW), isTT = !!(f & KB_F.TT);
+      if (signed) sg.push(s);
+      if (isNew) {
+        newN++; if (signed) newOk++;
+        if (arr !== KB_NONE) { arrNew.push(arr); if (arr > m - RS_TH.freshWin) fresh++; }
+        if (isTT) { ttN++; if (signed) ttOk++; } else { smN++; if (signed) smOk++; }
+      } else old++;
+      if (si >= 0) {
+        const nm = E.ships[si]; let h = ships.get(nm);
+        if (!h) ships.set(nm, h = { asg: 0, ok: 0, ft: null });
+        h.asg++; if (signed) { h.ok++; if (h.ft === null || s < h.ft) h.ft = s; }
+      }
+    }
+    arrNew.sort((x, y) => x - y);
+    return { n, newN, newOk, fresh, old, ttN, ttOk, smN, smOk, ships, sg, arrMed: arrNew.length ? arrNew[arrNew.length >> 1] : null };
+  }
+  // Từ giờ nào đường cong ký nhận lệch so với hôm qua (so mỗi nửa giờ, và còn lệch ở mốc hiện tại); null nếu không lệch rõ
+  function kbCurve(A, B, m, sign, strict) {
+    const cnt = (arr, t) => { let c = 0; for (const x of arr) if (x <= t) c++; return c; };
+    const gapMin = strict ? RS_TH.curveGap : 3, rel = strict ? RS_TH.curveRel : 0.08;
+    const gap = t => { const ca = cnt(A.sg, t), cb = cnt(B.sg, t); return { g: (ca - cb) * sign, thr: Math.max(gapMin, rel * Math.max(ca, cb)), ca, cb }; };
+    const end = gap(m); if (end.g < end.thr) return null;
+    for (let t = 540; t <= m; t += 30) { const x = gap(t); if (x.g >= x.thr) return { t0: t, ca: end.ca, cb: end.cb }; }
+    return { t0: m, ca: end.ca, cb: end.cb };
+  }
+  // cur, yd: bản ghi (ngày hoặc bản chụp) của cùng một bưu cục (kèm kbE/kbM là danh sách đơn Kanban nếu có); rain: { cur, yd } (mm) hoặc null
+  function buildReasons({ cur, yd, wk, rain }) {
+    if (!cur || !yd) return { dir: 'none', delta: null, reasons: [], why: !cur ? 'Chưa có số liệu của kỳ đang xem.' : 'Chưa lấy được số liệu hôm qua để so sánh (xem Cài đặt → Dữ liệu so sánh).' };
     const pc = ratio(cur.all.newOk, cur.all.newTotal), py = ratio(yd.all.newOk, yd.all.newTotal);
     if (!Number.isFinite(pc) || !Number.isFinite(py)) return { dir: 'none', delta: null, reasons: [], why: 'Chưa tính được POD2400 của một trong hai ngày.' };
     const delta = pc - py;
     if (Math.abs(delta) < RS_TH.minDelta) return { dir: 'flat', delta, pc, py, reasons: [] };
-    const sign = delta > 0 ? 1 : -1, out = [];
-    const add = (s, icon, text, w, k = 1) => { if (s === sign) out.push({ icon, text, w: Math.min(5, w) * k }); };   // k: độ tin cậy của loại lý do (ship, sản lượng trực tiếp nhất)
-    // 1. Số ship làm và đơn trên mỗi ship
+    const sign = delta > 0 ? 1 : -1, out = [], notes = [];
+    const add = (s, icon, text, w, k = 1) => { if (s === sign) out.push({ icon, text, w: Math.min(5, w) * k }); };   // k: độ tin cậy của loại lý do
+    // Danh sách đơn Kanban của hôm nay và hôm qua: dùng khi số đơn khớp với số của tool (Kanban cập nhật theo đợt nên có thể chậm hơn)
+    const A = cur.kbE ? kbStatsAt(cur.kbE, cur.kbM) : null, B = yd.kbE ? kbStatsAt(yd.kbE, yd.kbM) : null;
+    let packOk = false, signOk = false;
+    if (A && B) {
+      const tol = Math.max(3, 0.03 * cur.all.newTotal);
+      packOk = Math.abs(A.newN - cur.all.newTotal) <= tol;
+      signOk = packOk && Math.abs(A.newOk - cur.all.newOk) <= tol;
+      if (!packOk) notes.push('Danh sách đơn Kanban hôm nay chưa khớp số đơn mới của tool (Kanban cập nhật chậm hơn) nên chưa phân tích theo giờ hàng về và từng ship.');
+      else if (!signOk) notes.push('Số đơn ký nhận trên Kanban hôm nay chưa khớp số của tool (Kanban cập nhật chậm hơn): phần ký nhận theo ship và theo giờ dùng số liệu của tool, bỏ qua mục ship ôm đơn.');
+    }
+    if (!cur.kbE && yd.kbE) notes.push('Chưa có danh sách đơn hôm nay từ Kanban (đang lấy hoặc lấy lỗi) nên phân tích theo giờ hàng về và từng ship còn hạn chế.');
+    // A. Hàng đầu vào
+    if (packOk && A.arrMed !== null && B.arrMed !== null) {
+      const d = A.arrMed - B.arrMed;
+      if (Math.abs(d) >= RS_TH.arrMin) add(d > 0 ? -1 : 1, '📥', `Hàng về kho ${d > 0 ? 'trễ' : 'sớm'} hơn hôm qua: một nửa số đơn mới đã về lúc ${hmOf(A.arrMed)} (hôm qua ${hmOf(B.arrMed)})`, Math.abs(d) / RS_TH.arrMin, 1.5);
+    }
+    if (packOk && A.newN > 0 && B.newN > 0) {
+      const fa = A.fresh / A.newN * 100, fb = B.fresh / B.newN * 100, dd = fa - fb;
+      if (Math.abs(dd) >= RS_TH.freshPct) add(dd > 0 ? -1 : 1, '🕐', `${fmt(A.fresh)} đơn (${pct0(fa)}) mới về trong ${RS_TH.freshWin / 60} giờ qua, chưa kịp giao (hôm qua ${pct0(fb)})`, Math.abs(dd) / RS_TH.freshPct, 1.3);
+    }
+    if (yd.all.newTotal > 0) {
+      const vp = (cur.all.newTotal - yd.all.newTotal) / yd.all.newTotal * 100;
+      if (Math.abs(vp) >= RS_TH.vol) add(vp > 0 ? -1 : 1, '📦', `Sản lượng đơn mới ${vp > 0 ? 'tăng' : 'giảm'} ${pct0(Math.abs(vp))} (${fmt(cur.all.newTotal)} so với ${fmt(yd.all.newTotal)} đơn)`, Math.abs(vp) / RS_TH.vol, 1.4);
+    }
+    if (packOk) {
+      const dOld = A.old - B.old, rel = B.old > 0 ? dOld / B.old * 100 : (dOld > 0 ? 100 : 0);
+      if (Math.abs(dOld) >= RS_TH.oldAbs && Math.abs(rel) >= RS_TH.oldPct) add(dOld > 0 ? -1 : 1, '🗂', `Đơn tồn cũ phải phát ${dOld > 0 ? 'nhiều' : 'ít'} hơn hôm qua: ${fmt(A.old)} so với ${fmt(B.old)} đơn`, Math.abs(rel) / RS_TH.oldPct, 1.0);
+    }
+    if (signOk && A.newN > 0 && B.newN > 0) {
+      const sA = A.ttN / A.newN * 100, sB = B.ttN / B.newN * 100, dS = sA - sB;
+      const pTA = A.ttN > 0 ? A.ttOk / A.ttN * 100 : null, pSA = A.smN > 0 ? A.smOk / A.smN * 100 : null;
+      if (Math.abs(dS) >= RS_TH.ttShare && pTA !== null && pSA !== null && Math.abs(pTA - pSA) >= RS_TH.ttPod) {
+        add((dS > 0 ? 1 : -1) * (pTA < pSA ? -1 : 1), '🎵', `Tỉ trọng đơn TikTok ${dS > 0 ? 'tăng' : 'giảm'} từ ${pct0(sB)} ${dS > 0 ? 'lên' : 'còn'} ${pct0(sA)} (POD TikTok ${pct0(pTA)}, SME ${pct0(pSA)})`, Math.abs(dS) / RS_TH.ttShare, 0.9);
+      }
+      const pTB = B.ttN > 0 ? B.ttOk / B.ttN * 100 : null, pSB = B.smN > 0 ? B.smOk / B.smN * 100 : null;
+      if (A.ttN >= RS_TH.ttMin && B.ttN >= RS_TH.ttMin && pTA !== null && pTB !== null && pSA !== null && pSB !== null) {
+        const dT = pTA - pTB, dM = pSA - pSB;
+        if (Math.abs(dT) >= RS_TH.ttPod && Math.abs(dT - dM) >= RS_TH.ttPod * 0.8) add(dT > 0 ? 1 : -1, '🎵', `POD TikTok ${dT > 0 ? 'tốt' : 'kém'} hơn hôm qua: ${pct0(pTA)} so với ${pct0(pTB)} (SME ${pct0(pSA)} so với ${pct0(pSB)})`, Math.abs(dT) / RS_TH.ttPod, 1.0);
+      }
+    }
+    // B. Nhân lực
     const useScan = Number.isFinite(cur.nScan) && Number.isFinite(yd.nScan);
-    const nc = useScan ? cur.nScan : cur.nWork, ny = useScan ? yd.nScan : yd.nWork;
-    const loadC = nc > 0 ? cur.all.newTotal / nc : null, loadY = ny > 0 ? yd.all.newTotal / ny : null;
+    let nc, ny, ncLabel, loadC, loadY;
+    if (signOk) {
+      const cs = x => { let k = 0; for (const h of x.ships.values()) if (h.ok > 0) k++; return k; };
+      nc = cs(A); ny = cs(B); ncLabel = 'có đơn ký thành công'; loadC = nc > 0 ? A.newN / nc : null; loadY = ny > 0 ? B.newN / ny : null;
+    } else {
+      nc = useScan ? cur.nScan : cur.nWork; ny = useScan ? yd.nScan : yd.nWork; ncLabel = useScan ? 'có quét giao' : 'đi làm';
+      loadC = nc > 0 ? cur.all.newTotal / nc : null; loadY = ny > 0 ? yd.all.newTotal / ny : null;
+    }
     const loadPct = (loadC !== null && loadY !== null && loadY > 0) ? (loadC - loadY) / loadY * 100 : null;
     if (Number.isFinite(nc) && Number.isFinite(ny)) {
       const dN = nc - ny, rel = ny > 0 ? Math.abs(dN) / ny * 100 : 0;
       if (Math.abs(dN) >= 1 && rel >= RS_TH.shipPct) {
         const ext = (loadPct !== null && Math.abs(loadPct) >= RS_TH.load) ? `, mỗi ship ${loadPct > 0 ? 'gánh nhiều hơn' : 'nhẹ hơn'} ${pct0(Math.abs(loadPct))}` : '';
-        add(dN > 0 ? 1 : -1, '🚚', `${fmt(nc)} ship ${useScan ? 'có quét giao' : 'đi làm'} (${dN > 0 ? '+' : '−'}${Math.abs(dN)} so với hôm qua)${ext}`, rel / RS_TH.shipPct, 1.6);
+        add(dN > 0 ? 1 : -1, '🚚', `${fmt(nc)} ship ${ncLabel} (${dN > 0 ? '+' : '−'}${Math.abs(dN)} so với hôm qua)${ext}`, rel / RS_TH.shipPct, 1.6);
       } else if (loadPct !== null && Math.abs(loadPct) >= RS_TH.load) {
-        add(loadPct > 0 ? -1 : 1, '🚚', `Đơn trên mỗi ship ${fmt(Math.round(loadC))} (hôm qua ${fmt(Math.round(loadY))}), ${loadPct > 0 ? 'nhiều hơn' : 'ít hơn'} ${pct0(Math.abs(loadPct))}`, Math.abs(loadPct) / RS_TH.load, 1);
+        add(loadPct > 0 ? -1 : 1, '🚚', `Đơn trên mỗi ship ${fmt(Math.round(loadC))} (hôm qua ${fmt(Math.round(loadY))}), ${loadPct > 0 ? 'nhiều hơn' : 'ít hơn'} ${pct0(Math.abs(loadPct))}`, Math.abs(loadPct) / RS_TH.load, 1.2);
       }
     }
-    // 2. Sản lượng đơn mới
-    if (yd.all.newTotal > 0) {
-      const vp = (cur.all.newTotal - yd.all.newTotal) / yd.all.newTotal * 100;
-      if (Math.abs(vp) >= RS_TH.vol) add(vp > 0 ? -1 : 1, '📦', `Sản lượng đơn mới ${vp > 0 ? 'tăng' : 'giảm'} ${pct0(Math.abs(vp))} (${fmt(cur.all.newTotal)} so với ${fmt(yd.all.newTotal)} đơn)`, Math.abs(vp) / RS_TH.vol, 1.3);
-    }
-    // 3. Backlog 3 ngày
-    if (cur.backlog && yd.backlog && yd.backlog.total > 0) {
-      const d = cur.backlog.total - yd.backlog.total, rel = Math.abs(d) / yd.backlog.total * 100;
-      if (Math.abs(d) >= RS_TH.backlog && rel >= RS_TH.backlogPct) add(d > 0 ? -1 : 1, '🗂', `Backlog 3 ngày ${d > 0 ? 'tăng' : 'giảm'} ${fmt(Math.abs(d))} đơn (${fmt(cur.backlog.total)} so với ${fmt(yd.backlog.total)})`, rel / RS_TH.backlogPct, 0.5);
-    }
-    // 4. Giờ có đơn giao thành công đầu tiên
+    // Giờ ký đầu tiên của cả bưu cục
     if (Number.isFinite(cur.firstOk) && Number.isFinite(yd.firstOk)) {
       const d = cur.firstOk - yd.firstOk;
       if (Math.abs(d) >= RS_TH.first) add(d > 0 ? -1 : 1, '⏱', `Đơn giao thành công đầu tiên lúc ${hmOf(cur.firstOk)} (hôm qua ${hmOf(yd.firstOk)})`, Math.abs(d) / RS_TH.first, 0.6);
     }
-    // 5. Từng ship: % giao thành công cùng mốc giờ so với chính họ hôm qua, và giờ ra đường
-    const mc = shipMapOf(cur.ships), my = shipMapOf(yd.ships);
-    const per = [], lates = [];
-    for (const [k, a] of mc) {
-      const b = my.get(k); if (!b) continue;
-      if (a.sc >= RS_TH.shipMin && b.sc >= RS_TH.shipMin) per.push({ name: shipLabel(a.n), rc: a.ok / a.sc * 100, ry: b.ok / b.sc * 100, sc: a.sc });
-      if (Number.isFinite(a.ft) && Number.isFinite(b.ft)) lates.push(a.ft - b.ft);
+    // Từng ship: số đơn đã ký thành công cùng giờ so với chính họ hôm qua. Hôm nay lấy từ Kanban nếu khớp, không thì từ số liệu của tool
+    const keyOf = n => shipKeys(n).name || String(n ?? '').trim().toLowerCase();
+    const mapT = new Map(), mapY = new Map();
+    if (signOk) for (const [nm, h] of A.ships) mapT.set(keyOf(nm), { nm, ok: h.ok, asg: h.asg, ft: h.ft });
+    else for (const x of (cur.ships || [])) mapT.set(keyOf(x.n), { nm: x.n, ok: nz(x.ok), asg: null, ft: null });
+    if (B) for (const [nm, h] of B.ships) mapY.set(keyOf(nm), { nm, ok: h.ok, asg: h.asg, ft: h.ft });
+    else for (const x of (yd.ships || [])) mapY.set(keyOf(x.n), { nm: x.n, ok: nz(x.ok), asg: null, ft: null });
+    const shipData = mapT.size > 0 && mapY.size > 0;
+    if (shipData) {
+      const zero = [], per = [], lates = [];
+      for (const k of new Set([...mapT.keys(), ...mapY.keys()])) {
+        const a = mapT.get(k), b = mapY.get(k), ao = a ? a.ok : 0, bo = b ? b.ok : 0, nm = (a || b).nm;
+        if (b && bo >= RS_TH.shipDrop && ao === 0) zero.push({ nm, bo });
+        else if (Math.abs(ao - bo) >= RS_TH.shipDrop) per.push({ nm, ao, bo, d: ao - bo });
+        if (signOk && a && b && Number.isFinite(a.ft) && Number.isFinite(b.ft)) lates.push(a.ft - b.ft);
+      }
+      if (sign < 0 && zero.length) {
+        zero.sort((x, y) => y.bo - x.bo);
+        add(-1, '🚫', `${zero.length} ship hôm qua đã ký từ ${RS_TH.shipDrop} đơn mà hôm nay chưa ký đơn nào: ${zero.slice(0, 3).map(z => `${shipLabel(z.nm)} (${z.bo})`).join(', ')}${zero.length > 3 ? '…' : ''}`, zero.reduce((q, z) => q + z.bo, 0) / 10, 1.5);
+      }
+      const mine = per.filter(x => (x.d > 0 ? 1 : -1) === sign).sort((x, y) => Math.abs(y.d) - Math.abs(x.d));
+      mine.slice(0, 2).forEach(x => add(sign, '👤', `Ship ${shipLabel(x.nm)} ký ${fmt(x.ao)} đơn (hôm qua ${fmt(x.bo)}, cùng giờ)`, Math.abs(x.d) / RS_TH.shipDrop, 1.1));
+      if (mine.length >= 3) add(sign, '👥', `${mine.length} ship ký ${sign < 0 ? 'ít' : 'nhiều'} hơn hôm qua từ ${RS_TH.shipDrop} đơn trở lên, tổng chênh ${fmt(Math.abs(mine.reduce((q, x) => q + x.d, 0)))} đơn`, mine.length / 3, 1.0);
+      if (lates.length >= 3) {
+        const avg = lates.reduce((q, v) => q + v, 0) / lates.length;
+        if (Math.abs(avg) >= RS_TH.late) add(avg > 0 ? -1 : 1, '🕘', `${lates.length} ship ký đơn đầu tiên ${avg > 0 ? 'muộn hơn' : 'sớm hơn'} trung bình ${Math.round(Math.abs(avg))} phút so với hôm qua`, Math.abs(avg) / RS_TH.late, 0.9);
+      }
+      if (signOk) {
+        const hold = x => { let k = 0; for (const h of x.ships.values()) if (h.asg - h.ok >= RS_TH.hold) k++; return k; };
+        const hA = hold(A), hB = hold(B);
+        if (hA !== hB) add(hA > hB ? -1 : 1, '📮', `${hA} ship còn ôm từ ${RS_TH.hold} đơn chưa ký trở lên (hôm qua ${hB})`, Math.abs(hA - hB), 0.8);
+      }
     }
-    per.forEach(x => { x.diff = x.rc - x.ry; });
-    per.filter(x => (x.diff > 0 ? 1 : -1) === sign && Math.abs(x.diff) >= RS_TH.shipRate)
-      .sort((a, b) => Math.abs(b.diff) * Math.sqrt(b.sc) - Math.abs(a.diff) * Math.sqrt(a.sc)).slice(0, 2)
-      .forEach(x => add(sign, '👤', `Ship ${x.name} giao ${pct0(x.rc)} (hôm qua ${pct0(x.ry)}, cùng mốc giờ)`, Math.abs(x.diff) / RS_TH.shipRate, 0.9));
-    if (lates.length >= 3) {
-      const avg = lates.reduce((a, v) => a + v, 0) / lates.length;
-      if (Math.abs(avg) >= RS_TH.late) add(avg > 0 ? -1 : 1, '🕘', `${lates.length} ship ra đường ${avg > 0 ? 'muộn hơn' : 'sớm hơn'} trung bình ${Math.round(Math.abs(avg))} phút so với hôm qua`, Math.abs(avg) / RS_TH.late, 0.7);
+    // C. Nhịp giao: đường cong ký nhận theo giờ
+    const sgA = signOk ? A.sg : (Array.isArray(cur.sgm) && Number.isFinite(cur.kbM) ? cur.sgm.filter(x => x <= cur.kbM) : null), sgB = B ? B.sg : null;
+    const curve = sgA && sgB ? kbCurve({ sg: sgA }, { sg: sgB }, cur.kbM, sign, true) : null;
+    const curveTxt = c => `Từ khoảng ${hmOf(c.t0)} ký ${sign < 0 ? 'chậm' : 'nhanh'} hơn hôm qua: đến ${hmOf(cur.kbM)} có ${fmt(c.ca)} đơn ký thành công (hôm qua ${fmt(c.cb)})`;
+    if (curve) add(sign, '📉', curveTxt(curve), 1.5, 0.6);
+    // D. Chỉ có hôm nay: đơn mới chưa quét giao
+    if (sign < 0 && cur.all.newTotal > 0 && Number.isFinite(cur.all.newUns)) {
+      const pu = cur.all.newUns / cur.all.newTotal * 100;
+      if (pu >= RS_TH.unscan) add(-1, '📭', `Còn ${fmt(cur.all.newUns)} đơn mới chưa quét giao (${pct0(pu)} đơn mới)`, pu / RS_TH.unscan, 1.1);
     }
-    // 6. Thời tiết
+    // E. Thời tiết và ngày bất thường
     if (rain && Number.isFinite(rain.cur) && Number.isFinite(rain.yd)) {
       const f = v => v.toLocaleString('vi-VN');
       if (rain.cur >= RS_TH.rain && rain.cur - rain.yd >= RS_TH.rainGap) add(-1, '🌧', `Hôm nay mưa ${f(rain.cur)} mm (hôm qua ${f(rain.yd)} mm)`, (rain.cur - rain.yd) / RS_TH.rain, 0.9);
       else if (rain.yd >= RS_TH.rain && rain.yd - rain.cur >= RS_TH.rainGap) add(1, rain.cur < 0.5 ? '☀' : '🌦', `Hôm qua mưa ${f(rain.yd)} mm, hôm nay ${rain.cur < 0.5 ? 'không mưa' : f(rain.cur) + ' mm'}`, (rain.yd - rain.cur) / RS_TH.rain, 0.9);
     }
+    const wdOf = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10))).getUTCDay() : null;
+    const pw = wk && wk.all ? ratio(wk.all.newOk, wk.all.newTotal) : null;
+    if (wdOf(cur.date) === 0) add(-1, '📅', Number.isFinite(pw) && pw < py - 3 ? `Hôm nay là Chủ nhật: Chủ nhật tuần trước cùng giờ POD cũng chỉ ${pct0(pw)} (hôm qua ${pct0(py)})` : 'Hôm nay là Chủ nhật, nhịp giao thường khác ngày thường', 3, 1.0);
+    if (wdOf(yd.date) === 0) add(1, '📅', 'Hôm qua là Chủ nhật nên mức so sánh thấp hơn ngày thường', 3, 1.0);
     out.sort((a, b) => b.w - a.w);
-    const shipData = mc.size > 0 && my.size > 0;
-    return { dir: sign > 0 ? 'up' : 'down', delta, pc, py, reasons: out.slice(0, RS_TH.top), every: out, all: out.length, shipData, rainData: !!(rain && Number.isFinite(rain.cur) && Number.isFinite(rain.yd)) };
+    // Không lý do nào rõ: nêu khung giờ bắt đầu lệch (ngưỡng nhẹ hơn) thay vì bỏ trống
+    if (!out.length && sgA && sgB) { const c2 = kbCurve({ sg: sgA }, { sg: sgB }, cur.kbM, sign, false); if (c2) out.push({ icon: '📉', text: curveTxt(c2), w: 0.5 }); }
+    return { dir: sign > 0 ? 'up' : 'down', delta, pc, py, reasons: out.slice(0, RS_TH.top), every: out, all: out.length, shipData, packOk, signOk, notes, rainData: !!(rain && Number.isFinite(rain.cur) && Number.isFinite(rain.yd)) };
   }
 
   // Lỗi do phiên đăng nhập hết hạn / chưa đăng nhập
@@ -1158,89 +1353,6 @@
     const t = Object.assign({}, ANM_TH[k], user && user[k]);
     if (!Number.isFinite(t.hi)) return null;
     return Math.max(0, Math.ceil(t.hi / 100 * pair[1] - pair[0] - 1e-9));
-  }
-
-  /* ---- Dự báo POD2400 cuối ngày: nền thống kê từ các ngày trước + khung gọi AI ---- */
-  const FC_DAYS = 28, FC_MAXADJ = 5;
-  const medianOf = a => { const s = [...a].sort((x, y) => x - y), n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; };
-  const wdOf = dt => new Date(`${dt}T12:00:00`).getDay();
-  // getAt(dt) = POD tại mốc giờ của ngày dt; getFin(dt) = POD cuối ngày dt (hoặc null)
-  function forecastPairs(getAt, getFin, base, days = FC_DAYS) {
-    const out = [];
-    for (let i = 1; i <= days; i++) {
-      const dt = addDays(base, -i), at = getAt(dt), fin = getFin(dt);
-      if (Number.isFinite(at) && Number.isFinite(fin)) out.push({ date: dt, at, fin, wd: wdOf(dt) });
-    }
-    return out;
-  }
-  // Mức tăng POD từ mốc giờ đến cuối ngày (trung vị các ngày trước, ưu tiên cùng thứ nếu có ≥ 3 ngày)
-  function forecastBase(podNow, pairs, wd) {
-    if (!Number.isFinite(podNow)) return { ok: false, n: 0 };
-    const all = (pairs || []).filter(p => Number.isFinite(p.at) && Number.isFinite(p.fin));
-    if (all.length < 3) return { ok: false, n: all.length };
-    const same = all.filter(p => p.wd === wd), use = same.length >= 3 ? same : all;
-    const gains = use.map(p => p.fin - p.at), med = medianOf(gains);
-    const mad = medianOf(gains.map(g => Math.abs(g - med)));
-    const spread = Math.max(1, Math.round(1.4826 * mad * 2) / 2);
-    const fc = Math.max(0, Math.min(100, podNow + med)), n = use.length;
-    const conf = (n >= 14 && spread <= 2.5) ? 'Cao' : (n < 7 || spread > 4) ? 'Thấp' : 'Vừa';
-    return { ok: true, n, fc, spread, conf, gain: med, sameWd: use === same };
-  }
-  const AI_PROMPT_DEFAULT = [
-    'Bạn là trợ lý phân tích vận hành bưu cục chuyển phát tại Việt Nam. Trả lời bằng tiếng Việt.',
-    'POD2400 = tỷ lệ đơn mới giao thành công trong 24 giờ. Mỗi bưu cục có "baseline": con số dự báo POD cuối ngày do chương trình tính từ lịch sử các mốc giờ trước (đã chính xác về mặt toán).',
-    'Việc của bạn: xem tình trạng hôm nay (so hôm qua cùng mốc giờ: số DM đi làm, sản lượng, backlog 5 ngày, đơn chưa quét giao, giờ giao thành công đầu tiên, mưa) rồi quyết định có chỉnh baseline lên hoặc xuống không.',
-    'Quy tắc: (1) KHÔNG tự tính lại con số từ đầu, chỉ chỉnh baseline; (2) mức chỉnh tối đa ±5 điểm, thường 0 đến ±2; (3) mỗi lý do phải nêu số cụ thể lấy từ dữ liệu được gửi; (4) thiếu dữ liệu thì đừng chỉnh và đừng bịa nguyên nhân; (5) mỗi bưu cục tối đa 3 lý do, mỗi lý do dưới 120 ký tự.',
-    'Chỉ trả về MỘT khối JSON, không thêm chữ nào khác, đúng dạng: {"offices":[{"office":"<đúng tên đã gửi>","forecast":<số %, một chữ số thập phân>,"reasons":["...","..."]}]}'
-  ].join('\n');
-  const finite = v => (typeof v === 'number' && Number.isFinite(v)) ? Math.round(v * 10) / 10 : null;
-  // items: [{ office, podNow, podYd, podWk, base:{fc,spread,conf,n}, backlog5, unscanned, scanRate, total, totalYd, dm, dmYd, firstOk, firstOkYd, finals, rain:{cur,yd} }]
-  function buildAiPayload({ day, slot, items }) {
-    return {
-      date: day, slot,
-      offices: items.map(i => ({
-        office: i.office, pod_now: finite(i.podNow), pod_yesterday_same_slot: finite(i.podYd), pod_last_week_same_slot: finite(i.podWk),
-        baseline: { forecast: finite(i.base.fc), spread: finite(i.base.spread), confidence: i.base.conf, days_used: i.base.n },
-        backlog_5d: finite(i.backlog5), unscanned: finite(i.unscanned), scan_rate_pct: finite(i.scanRate),
-        orders_total: finite(i.total), orders_total_yesterday: finite(i.totalYd), dm_working: finite(i.dm), dm_working_yesterday: finite(i.dmYd),
-        first_success_time: Number.isFinite(i.firstOk) ? hmOf(i.firstOk) : null, first_success_time_yesterday: Number.isFinite(i.firstOkYd) ? hmOf(i.firstOkYd) : null,
-        final_pod_last_days: (i.finals || []).map(finite),
-        rain_mm_today: i.rain ? finite(i.rain.cur) : null, rain_mm_yesterday: i.rain ? finite(i.rain.yd) : null
-      }))
-    };
-  }
-  function aiRequestBody(model, system, userText, maxTokens) {
-    return { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: userText }] };
-  }
-  // baseMap: { office: { fc, spread, conf } } ; trả về { office: { fc, low, high, conf, reasons, adj, clamped, fromBase } }
-  function parseAiReply(text, baseMap) {
-    let obj = null;
-    const s = String(text ?? ''), a = s.indexOf('{'), b = s.lastIndexOf('}');
-    if (a >= 0 && b > a) { try { obj = JSON.parse(s.slice(a, b + 1)); } catch { obj = null; } }
-    const list = obj && Array.isArray(obj.offices) ? obj.offices : null;
-    if (!list) throw new Error('AI trả về không đúng định dạng');
-    const byName = new Map(); for (const o of list) if (o && typeof o.office === 'string') byName.set(o.office.trim(), o);
-    const out = {};
-    for (const [name, base] of Object.entries(baseMap)) {
-      const o = byName.get(name), fcRaw = o ? Number(o.forecast) : NaN;
-      if (!o || !Number.isFinite(fcRaw)) { out[name] = { fc: base.fc, low: Math.max(0, base.fc - base.spread), high: Math.min(100, base.fc + base.spread), conf: base.conf, reasons: [], adj: 0, clamped: false, fromBase: true }; continue; }
-      const lo = Math.max(0, base.fc - FC_MAXADJ), hi = Math.min(100, base.fc + FC_MAXADJ), fc = Math.min(hi, Math.max(lo, fcRaw));
-      const reasons = (Array.isArray(o.reasons) ? o.reasons : []).filter(x => typeof x === 'string' && x.trim()).slice(0, 3).map(x => x.trim().slice(0, 140));
-      out[name] = { fc, low: Math.max(0, fc - base.spread), high: Math.min(100, fc + base.spread), conf: base.conf, reasons, adj: fc - base.fc, clamped: fc !== fcRaw, fromBase: false };
-    }
-    return out;
-  }
-  // Thông báo lỗi dễ hiểu khi gọi API AI
-  function aiErrMsg(status, bodyText, netErr) {
-    if (netErr) return 'Không kết nối được tới dịch vụ AI (mạng hoặc trang đang chặn kết nối ra ngoài)';
-    const t = String(bodyText ?? '').toLowerCase();
-    if (status === 401) return 'Khóa API không hợp lệ';
-    if (status === 403) return 'Khóa API không có quyền sử dụng';
-    if (status === 429) return 'Bị giới hạn tần suất, thử lại sau ít phút';
-    if (/credit|balance|billing/.test(t)) return 'Tài khoản chưa có số dư (nạp tiền trong Console)';
-    if (status === 404 || (status === 400 && /model/.test(t))) return 'Không tìm thấy mô hình AI, kiểm tra lại tên mô hình';
-    if (status >= 500) return 'Dịch vụ AI đang lỗi, thử lại sau';
-    return `Lỗi ${status || ''}`.trim();
   }
 
   /* ---- COD ship nộp tiền (tab ANM) ----
@@ -1348,6 +1460,19 @@
     const hm = `${pad(now.getHours())}:${pad(now.getMinutes())} ${fmtDM(dateKey(now))}`;
     if (!list.length) return `COD ship nộp 0đ · ${label} · ${fmtDM(day)}: không có ship nào (cập nhật ${hm})`;
     return [`🔴 COD ship chưa nộp đồng nào · ${label} · ngày ${fmtDM(day)} · ${list.length} ship · tổng ${fmtVnd(list.reduce((t, x) => t + x.owe, 0))} · cập nhật ${hm}`].concat(list.map(x => `${x.office === label ? '' : x.office + ' · '}${x.name} · chưa nộp ${fmtVnd(x.owe)}`)).join('\n');
+  }
+
+  // Ship chưa nộp đủ trong ngày day (còn thiếu từ COD_MIN trở lên), xếp theo số tiền còn thiếu giảm dần
+  function codUnpaidList(byOffice, offices, day) {
+    const out = [];
+    for (const o of offices || []) for (const r of (byOffice && byOffice[o]) || []) if (r && r.date === day && r.owe >= COD_MIN) out.push({ office: o, name: r.name, owe: r.owe, due: r.due, paid: r.paid });
+    return out.sort((a, b) => b.owe - a.owe || a.office.localeCompare(b.office) || String(a.name).localeCompare(String(b.name)));
+  }
+  function codUnpaidText(list, day, now, label) {
+    const hm = `${pad(now.getHours())}:${pad(now.getMinutes())} ${fmtDM(dateKey(now))}`;
+    if (!list.length) return `COD ship chưa nộp đủ · ${label} · ngày ${fmtDM(day)}: không có ship nào còn thiếu (cập nhật ${hm})`;
+    return [`💰 COD ship chưa nộp đủ · ${label} · ngày ${fmtDM(day)} · ${list.length} ship · còn thiếu ${fmtVnd(list.reduce((t, x) => t + x.owe, 0))} · cập nhật ${hm}`].concat(list.map(x =>
+      `${x.office} · ${x.name} · còn thiếu ${fmtVnd(x.owe)} (phải nộp ${fmtVnd(x.due)}, đã nộp ${fmtVnd(x.paid)})`)).join('\n');
   }
 
   // ----- Tự dò bưu cục quản lý (hàm thuần) -----
@@ -2083,22 +2208,199 @@
    * ------------------------------------------------------------------ */
   const snapStore = (() => { try { return makeSnapStore(indexedDB); } catch { return null; } })();
   const TAB_ID = Math.random().toString(36).slice(2);
+  const API_KB_DET = '/v9-order/dc/kanban/am/vn/site-kpi-kanban/get-sdisp-detail', API_KB_SUM = '/v9-order/dc/kanban/am/vn/site-kpi-kanban/get-sdisp', API_KB_SREC = '/v9-order/dc/kanban/am/get-srec-sdisp';
+  const KB_KEEP = 9, KB_RETRY_MS = 300000, KB_CMP_DAYS = [1, 7];
+  function makeKbStore(factory) {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const rq = factory.open('b8s-kb', 1);
+      rq.onupgradeneeded = () => { const db = rq.result; if (!db.objectStoreNames.contains('days')) db.createObjectStore('days', { keyPath: 'id' }); };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => { dbp = null; rej(rq.error || new Error('Không mở được kho số liệu so sánh')); };
+      rq.onblocked = () => { dbp = null; rej(new Error('Kho số liệu so sánh đang bị tab khác giữ')); };
+    }));
+    const tx = async (mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction('days', mode); let out; const r = fn(t.objectStore('days'));
+        if (r) r.onsuccess = () => { out = r.result; };
+        t.oncomplete = () => res(out); t.onerror = t.onabort = () => rej(t.error || new Error('Lỗi ghi kho số liệu so sánh'));
+      });
+    };
+    return { all: () => tx('readonly', st => st.getAll()), put: r => tx('readwrite', st => { st.put(r); }), delMany: ids => tx('readwrite', st => { ids.forEach(i => st.delete(i)); }), clear: () => tx('readwrite', st => { st.clear(); }) };
+  }
+  const kbStore = (() => { try { return makeKbStore(indexedDB); } catch { return null; } })();
+  const kbKey = (office, date) => `${office}|${date}`;
+  async function loadKb() {
+    const K = state.kb;
+    if (!kbStore) { K.err = 'Trình duyệt không hỗ trợ IndexedDB nên không giữ được số liệu so sánh (vẫn lấy được nhưng mỗi lần tải sẽ chậm hơn).'; K.ready = true; return; }
+    try {
+      const lim = addDays(dateKey(new Date()), -KB_KEEP), list = (await kbStore.all()) || [], dead = [];
+      for (const r of list) { if (!r || !r.id || !Array.isArray(r.P) || !Array.isArray(r.ships)) { if (r && r.id) dead.push(r.id); continue; } if (r.date < lim) dead.push(r.id); else K.map.set(r.id, r); }
+      if (dead.length) await kbStore.delMany(dead);
+    } catch (e) { K.err = `Không đọc được kho số liệu so sánh: ${e.message}`; }
+    K.ready = true;
+  }
+  async function kbFetchDay(code, date, light) {
+    const base = { siteCode: code, isSelfData: 0, isCargo: 0, isExpress: 0, nationCode: 'VN', statisticsDate: `${date} 00:00:00` };
+    const items = []; let size = 200, total = null;
+    for (let page = 1; page <= 80; page++) {
+      let d;
+      try { d = await apiPost(API_KB_DET, Object.assign({}, base, { dataKey: 'allCnt', page, size })); }
+      catch (e) { if (page === 1 && size > 50 && !isAuthError(e)) { size = 50; page--; continue; } throw e; }
+      const list = d && Array.isArray(d.list) ? d.list : [];
+      if (total === null) total = Number(d && d.total) || 0;
+      items.push(...list);
+      if (!list.length || items.length >= total) break;
+    }
+    if (light) return { items, total, sum: null };   // chỉ cần danh sách đơn (số hôm nay để phân tích nguyên nhân, không lưu)
+    const sum = await apiPost(API_KB_SUM, Object.assign({}, base, { timeFrom: `${date}T00:00:00.000+07:00` }));
+    let srec = null; try { srec = await apiPost(API_KB_SREC, Object.assign({}, base, { timeFrom: `${date}T00:00:00.000+07:00` })); } catch (e) { if (isAuthError(e)) throw e; }
+    const g = k => ((sum && sum.groupIndicatorList) || []).find(x => x && x.dataKeyPrefix === k) || null;
+    const one = k => { const x = ((sum && sum.singleIndicatorList) || []).find(y => y && y.dataKey === k); return x ? Number(x.value) : null; };
+    const pod = g('2400Pod'), att = g('tryDispIncludStock'), sd = srec && srec.sdisp ? srec.sdisp : null;
+    return { items, total, sum: {
+      all: sum && Number.isFinite(Number(sum.topicIndicatorValue)) ? Number(sum.topicIndicatorValue) : null, newN: one('todayAddSdispCnt'),
+      podOk: pod ? Number(pod.member) : null, podDen: pod ? Number(pod.denominator) : null, attOk: att ? Number(att.member) : null, attDen: att ? Number(att.denominator) : null,
+      newAttempt: sd ? Number(sd.attemptCnt) : null, newCnt: sd ? Number(sd.sdispCnt) : null, success: sd ? Number(sd.successCnt) : null
+    } };
+  }
+  // Đối chiếu danh sách đơn với số tổng của Kanban; trả về danh sách điểm lệch (rỗng = khớp) và số cuối ngày cho các chỉ số quét giao
+  function kbVerify(E, S) {
+    const c = kbDayCheck(E), bad = [];
+    if (Number.isFinite(S.all) && S.all !== c.all) bad.push(`tổng đơn ${c.all} ≠ ${S.all}`);
+    const nn = Number.isFinite(S.newN) ? S.newN : S.podDen;
+    if (Number.isFinite(nn) && nn !== c.newN) bad.push(`đơn mới ${c.newN} ≠ ${nn}`);
+    if (Number.isFinite(S.podOk) && S.podOk !== c.newOk) bad.push(`POD2400 tử số ${c.newOk} ≠ ${S.podOk}`);
+    const total = Number.isFinite(S.attDen) ? S.attDen : c.all;
+    const fin = {
+      total, unscanned: Number.isFinite(S.attOk) && Number.isFinite(S.attDen) ? S.attDen - S.attOk : null,
+      ok: Number.isFinite(S.success) ? S.success : c.ok, newTotal: Number.isFinite(S.newCnt) ? S.newCnt : c.newN,
+      newUns: Number.isFinite(S.newAttempt) && Number.isFinite(S.newCnt) ? S.newCnt - S.newAttempt : null
+    };
+    return { bad, fin, check: c };
+  }
+  // Lấy (nếu chưa có) số liệu của các ngày so sánh cho các bưu cục; chạy nền, ghi lỗi vào state.kb thay vì ném ra ngoài
+  // v3.30.2: số so sánh đã lưu nghi sai thì TỰ tải lại, không cần bấm “Lấy lại ngay”:
+  //  - bản lưu từ phiên bản cũ (v < 2): tải lại đúng một lần;
+  //  - bản tải trong 6 giờ đầu sau khi ngày kết thúc (Kanban chưa chốt số cả ngày): tải lại sau mốc đó;
+  //  - bản có từ 30 đơn trở lên mà không có đơn nào ký nhận (số cả ngày bằng 0): tải lại.
+  function kbStale(rec, date, nowMs) {
+    if (!rec || rec.v !== 2) return true;
+    const end = kbDay0(date) + 86400000, settle = end + 6 * 3600000, f = Date.parse(rec.fetchedAt);
+    if ((!Number.isFinite(f) || f < settle) && (nowMs ?? Date.now()) > settle) return true;
+    try { const c = kbDayCheck(rec); if (c.all >= 30 && c.ok === 0) return true; } catch { return true; }
+    return false;
+  }
+  async function kbEnsure(force) {
+    const K = state.kb;
+    if (K.running || !OFFICES.length || !state.fast) return;
+    if (!K.ready) { K.running = true; try { await loadKb(); } finally { K.running = false; } }
+    const now = new Date(), today = dateKey(now), jobs = [];
+    for (const o of OFFICES) for (const k of KB_CMP_DAYS) {
+      const date = addDays(today, -k), key = kbKey(o, date);
+      if (K.map.has(key) && !force && !kbStale(K.map.get(key), date)) continue;   // số đã lưu nghi sai thì tự tải lại; “Lấy lại ngay” (force) tải lại tất cả
+      if (!force && K.tried[key] && Date.now() - K.tried[key] < KB_RETRY_MS) continue;
+      jobs.push({ o, date, key });
+    }
+    if (!jobs.length) return;
+    K.running = true; K.msg = `Đang lấy số liệu hôm qua / tuần trước 0/${jobs.length}…`; if (state.view === 'anm' && !state.anm.loading) renderAnm();
+    ensureHdrHook();
+    const tk = parseList(state.tiktok); let p = 0, done = 0, auth = false;
+    const worker = async () => {
+      while (p < jobs.length && !auth) {
+        const j = jobs[p++]; K.tried[j.key] = Date.now();
+        try {
+          const site = await resolveSite(j.o), day = await kbFetchDay(site.code, j.date);
+          if (!day.items.length) throw new Error('API không trả đơn nào cho ngày này');
+          const E = kbPack(day.items, tk, j.date), v = kbVerify(E, day.sum);
+          K.diag[j.key] = { at: Date.now(), ok: !v.bad.length, text: v.bad.length ? `lệch: ${v.bad.join('; ')}` : `khớp Kanban (${v.check.all} đơn, ${v.check.newN} đơn mới, POD ${v.check.newOk}/${v.check.newN})` };
+          if (v.bad.length) throw new Error(`lệch với số tổng Kanban (${v.bad.join('; ')}) nên không dùng`);
+          const rec = { id: j.key, office: j.o, date: j.date, v: 2, fetchedAt: new Date().toISOString(), ships: E.ships, P: E.P, fin: v.fin };
+          K.map.set(j.key, rec); delete K.fail[j.key];
+          if (kbStore) { try { await kbStore.put(rec); } catch (e) { K.err = `Không lưu được số liệu so sánh: ${e.message}`; } }
+        } catch (e) {
+          if (isAuthError(e)) auth = true;
+          K.fail[j.key] = e.message; if (!K.diag[j.key]) K.diag[j.key] = { at: Date.now(), ok: false, text: e.message };
+          log(`Số liệu so sánh ${j.o} ${fmtDM(j.date)}: ${e.message}`, true);
+        }
+        done++; K.msg = `Đang lấy số liệu hôm qua / tuần trước ${done}/${jobs.length}…`;
+        if (state.view === 'anm' && !state.anm.loading) renderAnm();
+      }
+    };
+    try { await Promise.all([worker(), worker()]); }
+    finally {
+      K.running = false; const nf = jobs.filter(j => K.fail[j.key]).length;
+      K.msg = auth ? 'Cần đăng nhập lại trang 800BEST để lấy số liệu hôm qua / tuần trước.' : nf ? `Chưa lấy được ${nf}/${jobs.length} ngày so sánh (xem Cài đặt → Dữ liệu so sánh).` : '';
+      if (state.view === 'anm' && !state.anm.loading) renderAnm();
+      if (state.view === 'set') renderKbInfo();
+    }
+  }
+  // v3.20: danh sách đơn Kanban của HÔM NAY (chỉ giữ trong bộ nhớ, tối đa 8 phút) cho các bưu cục cần giải thích POD
+  const KB_TODAY_TTL = 8 * 60000;
+  async function kbEnsureToday(offs) {
+    const K = state.kb, today = dateKey(new Date());
+    if (K.todayRun || !state.fast || !OFFICES.length) return;
+    const jobs = [...new Set(offs || [])].filter(o => {
+      const e = K.today.get(o); if (e && e.date === today && Date.now() - e.at < KB_TODAY_TTL) return false;
+      const t = K.todayTried[o]; return !(t && Date.now() - t < KB_RETRY_MS);
+    });
+    if (!jobs.length) return;
+    K.todayRun = true; ensureHdrHook();
+    const tk = parseList(state.tiktok); let p = 0, got = 0, auth = false;
+    const worker = async () => {
+      while (p < jobs.length && !auth) {
+        const o = jobs[p++]; K.todayTried[o] = Date.now();
+        try {
+          const site = await resolveSite(o), day = await kbFetchDay(site.code, today, true);
+          if (!day.items.length) throw new Error('API không trả đơn nào cho hôm nay');
+          K.today.set(o, { date: today, at: Date.now(), E: kbPack(day.items, tk, today) }); delete K.todayTried[o]; got++;
+        } catch (e) { if (isAuthError(e)) auth = true; log(`Danh sách đơn hôm nay (phân tích nguyên nhân) ${o}: ${e.message}`, true); }
+      }
+    };
+    try { await Promise.all([worker(), worker()]); }
+    finally { K.todayRun = false; if (got && state.view === 'anm' && !state.anm.loading) renderAnm(); }
+  }
+  // Bản ghi so sánh của một bưu cục ở một ngày, tại phút m của ngày; null nếu chưa có số liệu
+  function kbRec(office, date, m) {
+    const E = state.kb.map.get(kbKey(office, date));
+    if (!E) return null;
+    const r = kbAt(E, m, state.dm, office, date), dayRec = (state.hist.get(`${office}|${date}`) || null);
+    r.kbE = E; r.kbM = m;
+    if (dayRec && dayRec.verified !== false) {   // DM đã lưu theo đúng luật của tool (giờ quét đầu, chức vụ) thì dùng số đó
+      if (Number.isFinite(dayRec.nWork) && !dayRec.workersEstimated) { r.nWork = dayRec.nWork; r.workersEstimated = false; }
+      if (Number.isFinite(dayRec.nScan)) r.nScan = dayRec.nScan;
+    }
+    return r;
+  }
+  function renderKbInfo() {
+    const box = $('#b8s-kb-st'), btn = $('#b8s-kb'); if (!box) return;
+    const K = state.kb, today = dateKey(new Date());
+    if (btn) { btn.disabled = !!K.running; btn.textContent = K.running ? 'Đang lấy…' : 'Lấy lại ngay'; }
+    const rows = [];
+    for (const o of OFFICES) for (const k of KB_CMP_DAYS) {
+      const date = addDays(today, -k), key = kbKey(o, date), d = K.diag[key], have = K.map.has(key);
+      rows.push(`<tr><td class="l">${esc(o)}</td><td>${esc(fmtDM(date))}</td><td>${have ? '✔' : '—'}</td><td class="l ${d && !d.ok ? 'bad' : ''}">${esc(d ? d.text : (have ? 'đã lưu từ lần trước' : 'chưa lấy'))}</td></tr>`);
+    }
+    box.innerHTML = `${K.msg ? `<div>${esc(K.msg)}</div>` : ''}${K.err ? `<div class="bad">${esc(K.err)}</div>` : ''}<div class="b8s-tw" style="max-height:220px;overflow:auto"><table><thead><tr><th class="l">Bưu cục</th><th>Ngày</th><th>Có</th><th class="l">Đối chiếu số tổng Kanban</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+  }
+
+  // Tải một bưu cục bằng API và lưu: bản ghi ngày (như khi tải tay) + bản chụp của mốc
   const API_DET = '/v9-order/amTodayDispBoard/getTodayDetail', API_EMP = '/v9-order/amTodayDispBoard/getTodayEmployeeSum', API_SITE = '/sea-man/node/pageQuery';
   async function apiPost(path, body) {
     // Trang đăng nhập bằng cookie nên header token thường RỖNG; dùng bộ tiêu đề mặc định rồi ghi đè bằng giá trị đã bắt được từ trang
     const hdr = Object.assign({ Accept: 'application/json, text/plain, */*', 'lang-type': 'vi-VN', langType: 'vi-VN', 'TIME-ZONE': 'GMT+7', 'data-masking-N': 'mark', 'no-offset-timeZone': 'true', token: '', 'X-Requested-With': 'XMLHttpRequest' }, state.apiHdr);
+    // Luôn gọi bằng tiếng Việt: tên chức vụ, trạng thái… đổi theo ngôn ngữ của header, nếu theo ngôn ngữ trang (en/zh) thì bộ lọc chức vụ lệch hết
+    for (const k of Object.keys(hdr)) if (/^lang-?type$/i.test(k)) delete hdr[k];
+    hdr['lang-type'] = 'vi-VN'; hdr.langType = 'vi-VN';
     for (const k of Object.keys(hdr)) if (typeof hdr[k] === 'boolean') hdr[k] = String(hdr[k]);
     hdr['Content-Type'] = 'application/json;charset=UTF-8';
     const r = await fetch(location.origin + path, { method: 'POST', credentials: 'include', headers: hdr, body: JSON.stringify(body) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = JSON.parse(await r.text());
-    if (!j || j.success === false) throw new Error((j && (j.errMsg || j.message || j.msg)) || 'API báo thất bại');
+    if (!j || j.success === false || (j.success === undefined && j.code !== undefined && Number(j.code) !== 200)) throw new Error((j && (j.errMsg || j.message || j.msg)) || 'API báo thất bại');
     return j.data;
   }
-  /* ------------------------------------------------------------------ *
-   * Dự báo POD2400 cuối ngày bằng AI (tùy chọn, bật/tắt dưới bảng xếp hạng)
-   * Chỉ gửi các con số tổng hợp của bưu cục (không có mã đơn, tên ship, thông tin người nhận).
-   * ------------------------------------------------------------------ */
   function loadSites() { try { const o = JSON.parse(localStorage.getItem('b8s_sites') || '{}'); if (o && typeof o === 'object') Object.assign(state.sites, o); } catch { /* bỏ qua */ } }
   function saveSites() { try { localStorage.setItem('b8s_sites', JSON.stringify(state.sites)); } catch { /* bỏ qua */ } }
   // ----- Danh sách bưu cục quản lý: thêm / xóa ở Cài đặt, lưu trên trình duyệt -----
@@ -2366,9 +2668,10 @@
     return apiSave(name, t, items, total, diag);
   }
   async function apiSave(name, t, items, total, diag) {
-    const calc = computeDashboard({ orders: t.orders, emp: t.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now: new Date(), rules: state.dm });
+    const calc = computeDashboard({ orders: t.orders, emp: t.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now: new Date(), rules: state.dm, skip: shipSkipFn(name) });
     const d = decideSave({ hasOrders: true, pageOffice: name, startOffice: name, expectedOffice: name, ovNeed: total, computedTotal: calc.cards.all.total, diag });
     const rec = buildRecord({ office: canonOffice(name, OFFICES) || name, now: new Date(), calc, verified: !!d.verified });
+    state.kb.sg.set(rec.office, { date: rec.date, at: Date.parse(rec.savedAt) || Date.now(), sg: signMinsOf(t.orders, state.statusMap, new Date()) });
     if (!d.save) { return { saved: false, reason: d.reason, rec: d.force ? rec : null }; }
     await putRecords([rec]);
     state.lastSaved = new Date();
@@ -2456,11 +2759,11 @@
     { k: 'total', label: 'Tổng đơn', kind: 'avg' },
     { k: 'scanRate', label: 'Tỷ lệ quét giao', kind: 'pct' },
     { k: 'pod', label: 'POD2400', kind: 'pct', n: 'podN' },
-    { k: 'podTT', label: 'POD TTS', kind: 'pct', n: 'podTTN' },
+    { k: 'podTT', label: 'POD TikTok', kind: 'pct', n: 'podTTN' },
     { k: 'gtcTrip', label: 'GTC chuyến', kind: 'pct' },
     { k: 'gtcTotal', label: 'GTC Total', kind: 'pct' },
     { k: 'backlog', label: 'Backlog 3 ngày', kind: 'avg', last: 'backlogLast' },
-    { k: 'odr', label: 'TTS đến hạn ODR', kind: 'avg', last: 'odrLast' },
+    { k: 'odr', label: 'TikTok đến hạn ODR', kind: 'avg', last: 'odrLast' },
     { k: 'nWork', label: 'Shipper đi làm', kind: 'avg' }
   ];
 
@@ -2541,7 +2844,7 @@
         const nx = Number.isFinite(x) ? x : -Infinity, ny = Number.isFinite(y) ? y : -Infinity;
         return (nx - ny) * dir;
       });
-      const cols = [['name', 'Shipper', 'text'], ['office', 'Bưu cục', 'text'], ['days', 'Số ngày đi làm', 'int'], ['sc', 'Đã quét giao', 'int'], ['avgSc', 'TB/ngày', 'avg'], ['ok', 'Giao thành công', 'int'], ['rateTrip', '% GTC chuyến', 'pct'], ['tt', 'Đơn TTS', 'int'], ['tk', 'TTS giao thành công', 'int'], ['rateTT', '% GTC TTS', 'pct'], ['sg', 'Đã ký nhận (tab NV)', 'int']];
+      const cols = [['name', 'Shipper', 'text'], ['office', 'Bưu cục', 'text'], ['days', 'Số ngày đi làm', 'int'], ['sc', 'Đã quét giao', 'int'], ['avgSc', 'TB/ngày', 'avg'], ['ok', 'Giao thành công', 'int'], ['rateTrip', '% GTC chuyến', 'pct'], ['tt', 'Đơn TikTok', 'int'], ['tk', 'TikTok giao thành công', 'int'], ['rateTT', '% GTC TikTok', 'pct'], ['sg', 'Đã ký nhận (tab NV)', 'int']];
       body = list.length ? `<div class="b8s-tw"><table><thead><tr><th class="g-nav">#</th>${cols.map(([k, l]) => `<th class="g-gh ${k === 'name' ? 'l' : ''}" data-sk="${k}">${esc(l)}${hv.ssort.key === k ? (dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead><tbody>${
         list.map((x, i) => `<tr><td>${i + 1}</td>${cols.map(([k, , kind]) => kind === 'text' ? `<td class="l">${esc(x[k])}</td>` : kind === 'pct' ? `<td class="${rateClass(x[k])}">${esc(fmtVal(x[k], 'pct'))}</td>` : kind === 'avg' ? `<td>${x[k] === null ? '—' : esc(fmtAvg(x[k]))}</td>` : `<td>${x[k] === null ? '—' : esc(fmt(x[k]))}</td>`).join('')}</tr>`).join('')
       }</tbody></table></div>` : '<div class="b8s-empty">Không có dữ liệu shipper trong khoảng này.</div>';
@@ -2555,7 +2858,7 @@
           (whole ? `<tr class="total"><td class="l">Cả kỳ</td><td>${fmt(whole.days)}</td>${HCOLS.map(c => hcell(c, whole, null, true)).join('')}${canDel ? '<td></td>' : ''}</tr>` : '') +
           show.map(g => `<tr><td class="l"><b>${esc(g.label)}</b>${g.recs.some(r => !r.verified) ? ' <span title="Có bản ghi chưa đối chiếu được tổng đơn với trang">⚠</span>' : ''}</td><td>${fmt(g.m.days)}</td>${HCOLS.map(c => hcell(c, g.m, g.delta, g.m.days > 1)).join('')}${canDel ? `<td><button class="b8sx" title="Xóa bản ghi ngày này" data-del="${esc(g.recs[0].id)}">✕</button></td>` : ''}</tr>`).join('')
         }</tbody></table></div>
-        <div class="b8s-notes">Tỷ lệ của tuần/tháng được tính lại từ tổng số đơn của cả kỳ (không lấy trung bình các %). Tổng đơn, Backlog, TTS đến hạn ODR, Shipper đi làm là trung bình mỗi ngày; rê chuột vào ô để xem số đơn hoặc giá trị ngày cuối kỳ. ▲▼ là chênh lệch điểm % so với kỳ trước.</div>`;
+        <div class="b8s-notes">Tỷ lệ của tuần/tháng được tính lại từ tổng số đơn của cả kỳ (không lấy trung bình các %). Tổng đơn, Backlog, TikTok đến hạn ODR, Shipper đi làm là trung bình mỗi ngày; rê chuột vào ô để xem số đơn hoặc giá trị ngày cuối kỳ. ▲▼ là chênh lệch điểm % so với kỳ trước.</div>`;
       }
     }
     box.innerHTML = controls + body;
@@ -2594,17 +2897,17 @@
     if (!f.recs.length) return;
     const pct = v => Number.isFinite(v) ? round1(v) : '';
     const avg = v => (v === null || v === undefined || !Number.isFinite(v)) ? '' : round1(v);
-    const head = ['Kỳ', 'Số ngày', 'Tổng đơn (TB/ngày)', 'Tỷ lệ quét giao (%)', 'POD2400 (%)', 'POD TTS (%)', 'GTC chuyến (%)', 'GTC Total (%)', 'Backlog 3 ngày (TB/ngày)', 'Backlog ngày cuối', 'TTS đến hạn ODR (TB/ngày)', 'ODR ngày cuối', 'Shipper đi làm (TB/ngày)'];
+    const head = ['Kỳ', 'Số ngày', 'Tổng đơn (TB/ngày)', 'Tỷ lệ quét giao (%)', 'POD2400 (%)', 'POD TikTok (%)', 'GTC chuyến (%)', 'GTC Total (%)', 'Backlog 3 ngày (TB/ngày)', 'Backlog ngày cuối', 'TikTok đến hạn ODR (TB/ngày)', 'ODR ngày cuối', 'Shipper đi làm (TB/ngày)'];
     const line = (label, m) => [label, m.days, avg(m.total), pct(m.scanRate), pct(m.pod), pct(m.podTT), pct(m.gtcTrip), pct(m.gtcTotal), avg(m.backlog), avg(m.backlogLast), avg(m.odr), avg(m.odrLast), avg(m.nWork)];
     const list = trendRows(f.recs, state.hv.group);
     addSheet('Lich su', [head, ...list.map(g => line(g.label, g.m)), ...(list.length > 1 ? [line('CẢ KỲ', metricsOf(aggregate(f.recs)))] : [])]);
-    addSheet('Theo ngay', [['Ngày', 'Bưu cục', 'Tổng đơn', 'Chưa quét giao', 'Giao thành công', 'Đơn mới', 'Đơn mới giao thành công', 'TTS tổng', 'TTS giao thành công', 'Backlog 3 ngày', 'Chờ duyệt', 'Giao thất bại', 'Nhập kho chưa quét', 'TTS đến hạn ODR', 'Shipper đi làm', 'Đã đối chiếu'],
+    addSheet('Theo ngay', [['Ngày', 'Bưu cục', 'Tổng đơn', 'Chưa quét giao', 'Giao thành công', 'Đơn mới', 'Đơn mới giao thành công', 'TikTok tổng', 'TikTok giao thành công', 'Backlog 3 ngày', 'Chờ duyệt', 'Giao thất bại', 'Nhập kho chưa quét', 'TikTok đến hạn ODR', 'Shipper đi làm', 'Đã đối chiếu'],
       ...f.recs.map(r => [r.date, r.office, r.all.total, r.all.unscanned, r.all.ok, r.all.newTotal, r.all.newOk, r.tt.total, r.tt.ok, r.backlog ? r.backlog.total : '', r.backlog ? r.backlog.wait : '', r.backlog ? r.backlog.fail : '', r.backlog ? r.backlog.unscanned : '', r.odrTT ?? '', r.nWork, r.verified ? 'Có' : 'Chưa'])]);
     const sh = aggregateShippers(f.recs);
     if (sh.length) {
-      addSheet('Shipper tong', [['Shipper', 'Bưu cục', 'Số ngày đi làm', 'Đã quét giao', 'TB/ngày', 'Giao thành công', '% GTC chuyến', 'Đơn TTS', 'TTS giao thành công', '% GTC TTS', 'Đã ký nhận (tab NV)'],
+      addSheet('Shipper tong', [['Shipper', 'Bưu cục', 'Số ngày đi làm', 'Đã quét giao', 'TB/ngày', 'Giao thành công', '% GTC chuyến', 'Đơn TikTok', 'TikTok giao thành công', '% GTC TikTok', 'Đã ký nhận (tab NV)'],
         ...sh.sort((a, b) => (b.rateTrip ?? -1) - (a.rateTrip ?? -1)).map(x => [x.name, x.office, x.days, x.sc, avg(x.avgSc), x.ok, pct(x.rateTrip), x.tt, x.tk, pct(x.rateTT), x.sg ?? ''])]);
-      const day = [['Ngày', 'Bưu cục', 'Shipper', 'Đã quét giao', 'Giao thành công', '% GTC chuyến', 'Đơn TTS', 'TTS giao thành công', '% GTC TTS', 'Đã ký nhận (tab NV)']];
+      const day = [['Ngày', 'Bưu cục', 'Shipper', 'Đã quét giao', 'Giao thành công', '% GTC chuyến', 'Đơn TikTok', 'TikTok giao thành công', '% GTC TikTok', 'Đã ký nhận (tab NV)']];
       for (const r of f.recs) for (const s of r.ships) day.push([r.date, r.office, s.n, s.sc, s.ok, pct(ratio(s.ok, s.sc)), s.tt, s.tk, pct(ratio(s.tk, s.tt)), s.sg ?? '']);
       addSheet('Shipper theo ngay', day);
     }
@@ -2613,6 +2916,7 @@
   /* ------------------------------------------------------------------ *
    * Tab ANM: so sánh nhiều bưu cục (đọc từ lịch sử đã lưu)
    * ------------------------------------------------------------------ */
+  const pct2 = v => v.toLocaleString('vi-VN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const COD_IDS_BUILTIN = {};
   function codIds() {
     const m = {}; for (const [k, v] of Object.entries(COD_IDS_BUILTIN)) m[plain(k)] = v;
@@ -2623,6 +2927,600 @@
     try { const o = JSON.parse(localStorage.getItem('b8s_codsites') || '{}') || {}; localStorage.setItem('b8s_codsites', JSON.stringify(Object.assign(o, learned))); } catch { /* bỏ qua */ }
   }
   const isFS = o => /^\s*fs(\s|$)/i.test(String(o ?? ''));   // bưu cục FS không theo dõi COD
+  const API_PU_DET = '/v9-order/dc/kanban/am/get-srec-detail';
+  const PU_KEEP = 75, PU_TODAY_MS = 8 * 60000, PU_RETRY_MS = 300000, PU_WORKERS = 3;
+  const PU_TH = { good: 95, warn: 85 };
+  const pkNum = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
+  // Phân loại một dòng đơn
+  function pkCls(r) {
+    const ty = String(r.customerType ?? '').trim(), pk = !!(r.inNetworkTime), ot = Number(r.isOnTimeRec) === 1;
+    const bd = /^bd\s*sale$/i.test(ty), tt = /^tiktok$/i.test(ty);
+    const cb = r.isCrossBorder === undefined || r.isCrossBorder === null || r.isCrossBorder === '' ? null : Number(r.isCrossBorder) === 1;
+    return { pk, ot, bd, tt, ex: cb !== null ? cb : bd && pk && !ot };   // Kanban loại đơn cờ isCrossBorder = 1 khỏi mẫu số đúng hạn; thiếu trường thì dùng quy tắc cũ
+  }
+  // Gộp danh sách đơn thành số liệu theo shop (không có TikTok) + số tổng kể cả TikTok để đối chiếu Kanban
+  // sh: [tên, loại (B = BD Sale, S = còn lại), mới, cũ, mới đã lấy, cũ đã lấy, mới đúng hạn, mẫu số đúng hạn]
+  function pkAggregate(rows) {
+    const sh = new Map(), all = { n: 0, o: 0, ot: 0, den: 0, otA: 0, denA: 0 }; let unk = 0;
+    for (const r of rows || []) {
+      if (!r || typeof r !== 'object') continue;
+      const h = Number(r.isHistory);
+      if (h !== 0 && h !== 1) { unk++; continue; }
+      const c = pkCls(r), nw = h === 0, inDen = !c.ex;
+      if (nw) all.n++; else all.o++;
+      if (c.ot) all.otA++;
+      if (inDen) all.denA++;
+      if (nw) { if (c.ot) all.ot++; if (inDen) all.den++; }
+      if (c.tt) continue;
+      const name = String(r.customerName ?? '').replace(/\s+/g, ' ').trim() || String(r.customerType ?? '').trim() || '(không tên)';
+      let s = sh.get(name); if (!s) sh.set(name, s = [name, c.bd ? 'B' : 'S', 0, 0, 0, 0, 0, 0]);
+      if (nw) { s[2]++; if (c.pk) s[4]++; if (c.ot) s[6]++; if (inDen) s[7]++; } else { s[3]++; if (c.pk) s[5]++; }
+    }
+    return { sh: [...sh.values()], all, unk };
+  }
+  // So với số tổng của Kanban; trả về danh sách điểm lệch (rỗng = khớp)
+  function pkVerify(all, srec) {
+    const bad = [];
+    if (!srec || typeof srec !== 'object') return bad;
+    for (const [k, mine, key] of [['đơn mới', all.n, 'todaySrecCnt'], ['đơn cũ', all.o, 'historySrecCnt'], ['đúng hạn đơn mới', all.ot, 'successCnt'], ['mẫu số đúng hạn đơn mới', all.den, 'successDenCnt'], ['đúng hạn tất cả', all.otA, 'timelySrecAhCnt'], ['mẫu số đúng hạn tất cả', all.denA, 'timelySrecAhDenCnt']]) {
+      const t = pkNum(srec[key]);
+      if (t !== null && t !== mine) bad.push(`${k}: đếm ${mine}, Kanban ${t}`);
+    }
+    return bad;
+  }
+  async function pkFetchDay(code, date) {
+    const base = { siteCode: code, isSelfData: 0, isCargo: 0, isExpress: 0, nationCode: 'VN', statisticsDate: `${date} 00:00:00` };
+    const seen = new Map(); let size = 1000, total = null, got = 0;
+    for (let page = 1; page <= 60; page++) {
+      let d;
+      try { d = await apiPost(API_PU_DET, Object.assign({}, base, { dataKey: 'srecAhCnt', page, size })); }
+      catch (e) { if (page === 1 && size > 50 && !isAuthError(e)) { size = size > 200 ? 200 : 50; page--; continue; } throw e; }
+      const list = d && Array.isArray(d.list) ? d.list : [];
+      if (total === null) total = Number(d && d.total) || 0;
+      for (const r of list) { got++; seen.set(r && r.billCode ? String(r.billCode) : `#${got}`, r); }
+      if (!list.length || got >= total) break;
+    }
+    let srec = null;
+    try { const s = await apiPost(API_KB_SREC, Object.assign({}, base, { timeFrom: `${date}T00:00:00.000+07:00` })); srec = s && s.srec ? s.srec : null; } catch (e) { if (isAuthError(e)) throw e; }
+    return { rows: [...seen.values()], total, srec };
+  }
+  function pkRec(office, date, got, today) {
+    const ag = pkAggregate(got.rows), bad = pkVerify(ag.all, got.srec);
+    if (got.total && got.rows.length < got.total) bad.push(`thiếu dòng: nhận ${got.rows.length}/${got.total}`);
+    if (ag.unk) bad.push(`${ag.unk} dòng không rõ mới/cũ`);
+    return { id: `${office}|${date}`, office, date, at: Date.now(), fin: date < today, sh: ag.sh, bad, v: got.srec ? 1 : 0 };
+  }
+  // Số tổng của một bản ghi (đã bỏ TikTok)
+  function pkSum(rec) {
+    const s = { neu: 0, old: 0, pkn: 0, pko: 0, ot: 0, den: 0 };
+    for (const x of (rec && rec.sh) || []) { s.neu += x[2]; s.old += x[3]; s.pkn += x[4]; s.pko += x[5]; s.ot += x[6]; s.den += x[7]; }
+    return s;
+  }
+  const pkAdd = (a, b) => { for (const k of Object.keys(a)) a[k] += b[k]; return a; };
+  // Tổng của nhiều bưu cục trong một ngày; null nếu thiếu số liệu của bưu cục nào
+  function pkTotal(map, offices, date) {
+    const t = { neu: 0, old: 0, pkn: 0, pko: 0, ot: 0, den: 0 }, miss = [];
+    for (const o of offices) { const r = map.get(`${o}|${date}`); if (!r) miss.push(o); else pkAdd(t, pkSum(r)); }
+    return { t: miss.length ? null : t, miss };
+  }
+  // Gộp shop theo tên qua nhiều bưu cục
+  function pkShops(map, offices, date) {
+    const m = new Map();
+    for (const o of offices) {
+      const r = map.get(`${o}|${date}`); if (!r) continue;
+      for (const x of r.sh) {
+        let s = m.get(x[0]); if (!s) m.set(x[0], s = { name: x[0], t: x[1], neu: 0, old: 0, pkn: 0, pko: 0, ot: 0, den: 0 });
+        s.neu += x[2]; s.old += x[3]; s.pkn += x[4]; s.pko += x[5]; s.ot += x[6]; s.den += x[7]; if (x[1] === 'B') s.t = 'B';
+      }
+    }
+    return m;
+  }
+  // Kỳ thống kê Top 20 shop: từ mùng 1 đến mùng 7 thống kê CẢ THÁNG TRƯỚC, từ mùng 8 thống kê tháng này (mùng 1 đến ngày đang xem)
+  function pkTopSpan(date) {
+    const s = pkSpan(date);
+    if (s.dom <= 7) return { days: pkDays(s.prev0, s.pdim), month: s.pm, prevMonth: true, from: s.prev0, to: addDays(s.prev0, s.pdim - 1) };
+    return { days: pkDays(s.cur0, s.dom), month: s.m, prevMonth: false, from: s.cur0, to: date };
+  }
+  // Top n shop có tổng đơn mới (sản lượng gửi hàng) lớn nhất trong kỳ, gộp theo tên shop qua các bưu cục và các ngày đã có số liệu
+  function pkTopMonth(map, offices, days, n = 20) {
+    const m = new Map(), dayHave = new Set(); let have = 0, all = 0;
+    for (const o of offices) for (const d of days) {
+      const r = map.get(`${o}|${d}`); if (!r) continue;
+      have++; dayHave.add(d);
+      for (const x of r.sh) {
+        let t = m.get(x[0]); if (!t) m.set(x[0], t = { name: x[0], t: x[1], neu: 0, pkn: 0, ot: 0, den: 0 });
+        t.neu += x[2]; t.pkn += x[4]; t.ot += x[6]; t.den += x[7]; if (x[1] === 'B') t.t = 'B'; all += x[2];
+      }
+    }
+    const list = [...m.values()].filter(t => t.neu > 0).sort((a, b) => b.neu - a.neu || a.name.localeCompare(b.name, 'vi')).slice(0, n);
+    return { list, sum: list.reduce((t, x) => t + x.neu, 0), all, have, need: offices.length * days.length, dh: dayHave.size };
+  }
+  // Khoảng ngày của tháng này (từ mùng 1 đến ngày xem) và tháng trước (cùng số ngày + cả tháng)
+  function pkSpan(date) {
+    const y = +date.slice(0, 4), m = +date.slice(5, 7), dom = +date.slice(8, 10), py = m === 1 ? y - 1 : y, pm = m === 1 ? 12 : m - 1, pdim = new Date(Date.UTC(py, pm, 0)).getUTCDate();
+    return { cur0: `${y}-${pad(m)}-01`, prev0: `${py}-${pad(pm)}-01`, dom, pdim, cut: Math.min(dom, pdim), pm, m };
+  }
+  const pkDays = (a, n) => Array.from({ length: n }, (_, i) => addDays(a, i));
+  function pkMonthDays(date) { const s = pkSpan(date); return pkDays(s.cur0, s.dom).concat(pkDays(s.prev0, s.pdim)); }
+  // Tích lũy tháng của một shop ở một bưu cục
+  function pkMonth(map, office, name, date) {
+    const s = pkSpan(date), cur = pkDays(s.cur0, s.dom), prev = pkDays(s.prev0, s.pdim);
+    const pick = d => { const r = map.get(`${office}|${d}`); if (!r) return null; const x = r.sh.find(z => z[0] === name); return x ? { neu: x[2], pkn: x[4], ot: x[6], den: x[7] } : { neu: 0, pkn: 0, ot: 0, den: 0 }; };
+    const agg = (days) => { const t = { neu: 0, pkn: 0, ot: 0, den: 0 }; let have = 0; for (const d of days) { const p = pick(d); if (p) { have++; pkAdd(t, p); } } t.have = have; t.need = days.length; return t; };
+    return { cur: agg(cur), prevSame: agg(prev.slice(0, s.cut)), prevAll: agg(prev), curSeries: cur.map(d => { const p = pick(d); return p ? p.neu : null; }), prevSeries: prev.map(d => { const p = pick(d); return p ? p.neu : null; }), span: s };
+  }
+  const pkPct = (a, b) => b > 0 ? `${(a / b * 100).toFixed(2).replace('.', ',')}%` : '—';
+  const pkF = n => Math.round(n).toLocaleString('vi-VN');
+  const pkDow = k => ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'][new Date(keyToUTC(k)).getUTCDay()];
+  const pkDay = k => `${pkDow(k)} ${fmtDM(k)}`;
+  function pkPill(a, b) {
+    if (!(b > 0)) return '<span class="pk-pill na">không tính</span>';
+    const p = a / b * 100;
+    return `<span class="pk-pill ${p >= PU_TH.good ? 'good' : p >= PU_TH.warn ? 'warn' : 'bad'}">${p.toFixed(2).replace('.', ',')}%</span>`;
+  }
+  function pkDelta(v, pts) {
+    if (v === null || v === undefined || !Number.isFinite(v)) return '<span class="pk-fl" title="Chưa có số liệu ngày so sánh">—</span>';
+    if (pts ? Math.abs(v) < 0.005 : v === 0) return '<span class="pk-fl">0</span>';
+    const t = pts ? `${Math.abs(v).toFixed(1).replace('.', ',')} điểm` : pkF(Math.abs(v));
+    return `<span class="${v > 0 ? 'pk-up' : 'pk-dn'}">${v > 0 ? '▲ +' : '▼ −'}${t}</span>`;
+  }
+
+  // ----- Kho lưu số liệu theo ngày (IndexedDB b8s-pu); ngày đã chốt chỉ tải một lần -----
+  function makePkStore(factory) {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const rq = factory.open('b8s-pu', 1);
+      rq.onupgradeneeded = () => { const db = rq.result; if (!db.objectStoreNames.contains('days')) db.createObjectStore('days', { keyPath: 'id' }); };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => { dbp = null; rej(rq.error || new Error('Không mở được kho số liệu pickup')); };
+      rq.onblocked = () => { dbp = null; rej(new Error('Kho số liệu pickup đang bị tab khác giữ')); };
+    }));
+    const tx = async (mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction('days', mode); let out; const r = fn(t.objectStore('days'));
+        if (r) r.onsuccess = () => { out = r.result; };
+        t.oncomplete = () => res(out); t.onerror = t.onabort = () => rej(t.error || new Error('Lỗi ghi kho số liệu pickup'));
+      });
+    };
+    return { all: () => tx('readonly', st => st.getAll()), put: r => tx('readwrite', st => { st.put(r); }), delMany: ids => tx('readwrite', st => { ids.forEach(i => st.delete(i)); }) };
+  }
+  const pkStore = (() => { try { return makePkStore(indexedDB); } catch { return null; } })();
+  async function pkLoad() {
+    const P = state.pick; if (P.ready) return;
+    if (!pkStore) { P.err0 = 'Trình duyệt không hỗ trợ IndexedDB nên tab Pickup-sale không giữ được số liệu các ngày trước (vẫn xem được nhưng mỗi lần mở sẽ tải lại).'; P.ready = true; return; }
+    try {
+      const lim = addDays(dateKey(new Date()), -PU_KEEP), dead = [];
+      for (const r of (await pkStore.all()) || []) {
+        if (!r || !r.id || !Array.isArray(r.sh)) { if (r && r.id) dead.push(r.id); continue; }
+        if (r.date < lim) dead.push(r.id); else P.map.set(r.id, r);
+      }
+      if (dead.length) await pkStore.delMany(dead);
+    } catch (e) { P.err0 = `Không đọc được kho số liệu pickup: ${e.message}`; }
+    P.ready = true;
+  }
+  const pkOffices = () => anmOffices().filter(o => anmSel().has(o));
+  const pkNeed = (id, date, today, force) => {
+    const r = state.pick.map.get(id), P = state.pick;
+    if (force) return true;
+    if (P.tried[id] && Date.now() - P.tried[id] < PU_RETRY_MS) return false;
+    if (!r) return true;
+    if (r.fin) return false;
+    return date < today || Date.now() - r.at > PU_TODAY_MS;
+  };
+  let pkRedrawT = 0;
+  function pkRedraw(now) {
+    if (state.view !== 'pick') return;
+    if (now) { clearTimeout(pkRedrawT); pkRedrawT = 0; renderPick(); return; }
+    if (!pkRedrawT) pkRedrawT = setTimeout(() => { pkRedrawT = 0; if (state.view === 'pick') renderPick(); }, 350);
+  }
+  // Chạy các việc tải (office, date) với tối đa PU_WORKERS luồng; dừng nếu hết phiên đăng nhập
+  async function pkRun(jobs, onProg) {
+    const P = state.pick, today = dateKey(new Date()); let i = 0, done = 0, stop = false;
+    const worker = async () => {
+      while (!stop && i < jobs.length) {
+        const j = jobs[i++], id = `${j.office}|${j.date}`;
+        P.tried[id] = Date.now();
+        try {
+          const site = await resolveSite(j.office), got = await pkFetchDay(site.code, j.date), rec = pkRec(j.office, j.date, got, today);
+          P.map.set(id, rec); delete P.err[id];
+          if (pkStore) { try { await pkStore.put(rec); } catch (e) { P.err0 = `Không lưu được số liệu pickup: ${e.message}`; } }
+        } catch (e) {
+          P.err[id] = String(e && e.message || e);
+          if (isAuthError(e)) { stop = true; P.msg = 'Cần đăng nhập lại trang 800BEST để lấy số liệu pickup.'; }
+        }
+        done++; if (onProg) onProg(done, jobs.length);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(PU_WORKERS, jobs.length) }, worker));
+  }
+  async function pkEnsure(force) {
+    const P = state.pick; await pkLoad();
+    if (P.run || !state.fast) { if (!state.fast) { P.msg = 'Đang tắt “Tải nhanh bằng API” trong Cài đặt nên tab Pickup-sale không lấy được số liệu.'; renderPick(); } return; }
+    const today = dateKey(new Date()), d = P.date || today, offs = pkOffices(), dates = [d];
+    if (P.cmp !== 'w1') dates.push(addDays(d, -1));
+    if (P.cmp !== 'd1') dates.push(addDays(d, -7));
+    const jobs = []; for (const dt of dates) for (const o of offs) if (pkNeed(`${o}|${dt}`, dt, today, force && dt === d)) jobs.push({ office: o, date: dt });
+    if (!jobs.length) { renderPick(); return; }
+    P.run = true; P.msg = ''; P.prog = `Đang tải pickup 0/${jobs.length}…`; renderPick();
+    try { await pkRun(jobs, (a, b) => { P.prog = `Đang tải pickup ${a}/${b}…`; pkRedraw(); }); }
+    finally { P.run = false; P.prog = ''; P.at = Date.now(); renderPick(); }
+  }
+  // Tải các ngày còn thiếu của kỳ Top 20 (cả tháng) cho các bưu cục đang chọn; ngày đã chốt chỉ tải một lần và giữ trong kho
+  async function pkEnsureTop() {
+    const P = state.pick; await pkLoad();
+    if (P.run || !state.fast) { if (!state.fast) { P.msg = 'Đang tắt “Tải nhanh bằng API” trong Cài đặt nên tab Pickup-sale không lấy được số liệu.'; renderPick(); } return; }
+    const today = dateKey(new Date()), D = P.date || today, sp = pkTopSpan(D), offs = pkOffices();
+    const jobs = []; for (const o of offs) for (const dt of sp.days) if (dt <= today && pkNeed(`${o}|${dt}`, dt, today, false)) jobs.push({ office: o, date: dt });
+    if (!jobs.length) { renderPick(); return; }
+    P.run = true; P.msg = ''; P.prog = `Đang tải số liệu tháng ${sp.month} cho Top 20: 0/${jobs.length}…`; renderPick();
+    try { await pkRun(jobs, (a, b) => { P.prog = `Đang tải số liệu tháng ${sp.month} cho Top 20: ${a}/${b}…`; pkRedraw(); }); }
+    finally { P.run = false; P.prog = ''; P.at = Date.now(); renderPick(); }
+  }
+  async function pkEnsureMonth(office) {
+    const P = state.pick, today = dateKey(new Date()), d = P.date || today;
+    if (!office || P.mon.run || !state.fast) return;
+    const jobs = pkMonthDays(d).filter(dt => dt <= today && pkNeed(`${office}|${dt}`, dt, today, false)).map(dt => ({ office, date: dt }));
+    if (!jobs.length) return;
+    P.mon = { run: true, done: 0, total: jobs.length, office };
+    try { await pkRun(jobs, (a, b) => { P.mon.done = a; pkRedraw(); }); }
+    finally { P.mon = { run: false, done: 0, total: 0, office: '' }; pkRedraw(true); }
+  }
+
+  // ----- Vẽ tab -----
+  function pkChart(cur, prev, span) {
+    const W = 760, H = 190, L = 36, R = 40, T = 10, B = 22, n = Math.max(span.pdim, span.dom, 28);
+    let max = 0; for (const v of cur.concat(prev)) if (v !== null && v > max) max = v;
+    max = Math.max(10, Math.ceil(max * 1.1 / 10) * 10);
+    const X = d => L + (W - L - R) * (d - 1) / (n - 1), Y = v => T + (H - T - B) * (1 - v / max);
+    let g = '';
+    for (const q of [0, .5, 1]) { const v = Math.round(max * q); g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="#e5e7eb"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="10" fill="#6b7280">${v}</text>`; }
+    for (const d of [1, 5, 10, 15, 20, 25, 30].filter(x => x <= n)) g += `<text x="${X(d)}" y="${H - 6}" text-anchor="middle" font-size="10" fill="#6b7280">${d}</text>`;
+    const line = (a, c, dash) => { let p = '', pen = false; a.forEach((v, i) => { if (v === null) { pen = false; return; } p += `${pen ? 'L' : 'M'}${X(i + 1).toFixed(1)} ${Y(v).toFixed(1)}`; pen = true; }); return `<path d="${p}" fill="none" stroke="${c}" stroke-width="2" ${dash ? 'stroke-dasharray="5 4"' : ''} stroke-linejoin="round"/>`; };
+    let last = -1; cur.forEach((v, i) => { if (v !== null) last = i; });
+    const end = last >= 0 ? `<circle cx="${X(last + 1)}" cy="${Y(cur[last])}" r="4" fill="#4c3a8f"/><text x="${X(last + 1) + 7}" y="${Y(cur[last]) + 4}" font-size="11" font-weight="700" fill="#4c3a8f">${cur[last]}</text>` : '';
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Đơn mới mỗi ngày, tháng này so với tháng trước">${g}${line(prev, '#d97706', true)}${line(cur, '#4c3a8f', false)}${end}</svg>`;
+  }
+  const pkTag = t => t === 'B' ? '<span class="pk-tag bd">BD Sale</span>' : '<span class="pk-tag">Shop</span>';
+  function renderPick() {
+    const box = $('#b8s-pick'); if (!box) return;
+    const P = state.pick, now = new Date(), today = dateKey(now);
+    if (!anmOffices().length) { box.innerHTML = '<div class="pk-box" style="text-align:center;padding:28px"><b>Chưa có bưu cục nào để theo dõi</b><div class="pk-mu">Bấm “Tải số liệu” ở tab ANM để tool tự tìm bưu cục, hoặc thêm ở Cài đặt.</div></div>'; return; }
+    const D = P.date || today, D1 = addDays(D, -1), W1 = addDays(D, -7), offs = pkOffices(), allOffs = anmOffices();
+    const cmpD = []; if (P.cmp !== 'w1') cmpD.push(['D-1', D1]); if (P.cmp !== 'd1') cmpD.push(['W-1', W1]);
+    const cur = pkTotal(state.pick.map, offs, D), have = offs.filter(o => P.map.has(`${o}|${D}`));
+    if (P.off && !offs.includes(P.off)) { P.off = ''; P.shop = ''; }
+    if (!P.off) P.off = have[0] || offs[0] || '';
+    const T0 = cur.t || have.reduce((t, o) => pkAdd(t, pkSum(P.map.get(`${o}|${D}`))), { neu: 0, old: 0, pkn: 0, pko: 0, ot: 0, den: 0 });
+    const dd = (fn, key) => cmpD.map(([lb, dt]) => { const c = pkTotal(P.map, offs, dt); return `<em>${lb}</em> ${c.t && cur.t ? pkDelta(fn(T0) - fn(c.t), key === 'pts') : '<span class="pk-fl" title="Chưa đủ số liệu ngày so sánh">—</span>'}`; }).join(' ');
+    const sp = pkTopSpan(D), top = pkTopMonth(P.map, offs, sp.days), topFull = top.have >= top.need;
+    const tot = T0.neu + T0.old, got = T0.pkn + T0.pko;
+    const card = (lb, v, sub, d, extra) => `<div class="pk-c${extra ? ' click' : ''}"${extra || ''}><span>${lb}</span><b>${v}</b><small>${sub}</small><div class="pk-d">${d}</div></div>`;
+    const cards = [
+      card('Tổng đơn cần PU', pkF(tot), `${pkF(T0.neu)} mới + ${pkF(T0.old)} cũ`, dd(t => t.neu + t.old)),
+      card('Đơn mới', pkF(T0.neu), `${offs.length} bưu cục`, dd(t => t.neu)),
+      card('Đơn cũ (tồn)', pkF(T0.old), `${pkF(T0.old - T0.pko)} chưa PU`, dd(t => t.old)),
+      card('PU thành công', pkF(got), `${pkF(T0.pkn)} mới (${pkPct(T0.pkn, T0.neu)}) · ${pkF(T0.pko)} cũ`, dd(t => t.pkn + t.pko)),
+      card('Chưa PU', pkF(tot - got), `${pkF(T0.neu - T0.pkn)} mới · ${pkF(T0.old - T0.pko)} cũ`, dd(t => (t.neu + t.old) - (t.pkn + t.pko))),
+      card('PU đúng hạn, đơn mới', pkPct(T0.ot, T0.den), `${pkF(T0.ot)}/${pkF(T0.den)}`, dd(t => t.den ? t.ot / t.den * 100 : 0, 'pts')),
+      card(`Top 20 shop · tháng ${sp.month}`, top.have ? pkF(top.sum) : '—', topFull ? `chiếm ${pkPct(top.sum, top.all)} đơn mới cả tháng · <b class="go">bấm xem</b>` : `mới có ${top.have}/${top.need} lượt ngày · <b class="go">bấm để tải đủ</b>`, `<span class="pk-mu">${fmtDM(sp.from)} → ${fmtDM(sp.to)}</span>`, ' data-a="pkTop" title="Bấm để xem 20 shop có sản lượng lớn nhất trong tháng"')
+    ].join('');
+    // cảnh báo
+    const al = []; const oldU = [], exs = [];
+    for (const o of have) for (const x of P.map.get(`${o}|${D}`).sh) { if (x[3] - x[5] > 0) oldU.push({ o, n: x[0], v: x[3] - x[5] }); if (x[2] - x[7] > 0) exs.push({ o, n: x[0], v: x[2] - x[7] }); }
+    const oldTot = oldU.reduce((t, x) => t + x.v, 0);
+    if (oldTot > 0) { const m = oldU.reduce((a, b) => b.v > a.v ? b : a), ob = new Map(); oldU.forEach(x => ob.set(x.o, (ob.get(x.o) || 0) + x.v)); const [bo, bv] = [...ob.entries()].sort((a, b) => b[1] - a[1])[0];
+      al.push(`<div class="pk-al ${oldTot >= 100 ? 'bad' : 'warn'}"><b>Tồn cũ:</b> ${pkF(oldTot)} đơn cũ chưa PU toàn khu vực, nhiều nhất ở <b>${esc(bo)}</b> (${pkF(bv)} đơn). Shop nhiều nhất: <b>${esc(m.n)}</b> (${esc(m.o)}, ${pkF(m.v)} đơn).</div>`); }
+    if (exs.length) { const m = exs.reduce((a, b) => b.v > a.v ? b : a); al.push(`<div class="pk-al warn"><b>${esc(m.n)}</b> tạo ${pkF(m.v)} đơn tại điểm lấy (${esc(m.o)}), không tính vào đúng hạn.</div>`); }
+    const lows = have.map(o => { const s = pkSum(P.map.get(`${o}|${D}`)); return { o, r: s.neu ? s.pkn / s.neu : null }; }).filter(x => x.r !== null).sort((a, b) => a.r - b.r);
+    if (lows.length > 1) al.push(`<div class="pk-al info"><b>PU đơn mới thấp nhất:</b> ${esc(lows[0].o)} ${pkPct(lows[0].r, 1)}</div>`);
+    // bảng bưu cục
+    const orow = o => {
+      const r = P.map.get(`${o}|${D}`), er = P.err[`${o}|${D}`];
+      if (!r) return `<tr data-a="pkOff" data-o="${esc(o)}" class="${o === P.off ? 'sel' : ''}"><td class="nm"><b>${esc(o)}</b></td><td colspan="7" class="pk-mu">${er ? '⚠ không tải được: ' + esc(er) : P.run ? 'đang tải…' : 'chưa tải'}</td></tr>`;
+      const s = pkSum(r), tt = s.neu + s.old, g = s.pkn + s.pko, w1 = tt ? s.pkn / tt * 100 : 0, w2 = tt ? s.pko / tt * 100 : 0;
+      return `<tr data-a="pkOff" data-o="${esc(o)}" class="${o === P.off ? 'sel' : ''}"><td class="nm"><b>${esc(o)}</b>${r.bad.length ? ` <span class="pk-warn" title="${esc('Lệch với Kanban: ' + r.bad.join('; '))}">⚠</span>` : ''}</td><td class="n">${pkF(tt)}</td>
+        <td><div class="pk-stack" title="${pkF(s.pkn)} PU mới · ${pkF(s.pko)} PU cũ · ${pkF(tt - g)} chưa PU"><i style="width:${w1.toFixed(2)}%;background:#4c3a8f"></i><i style="width:${w2.toFixed(2)}%;background:#d97706"></i></div></td>
+        <td class="n">${pkF(s.neu)}</td><td class="n">${pkF(s.old)}</td><td class="n"><b>${pkF(s.pkn)}/${pkF(s.neu)}</b> ${pkPill(s.pkn, s.neu)}</td><td class="n"><b>${pkF(s.pko)}/${pkF(s.old)}</b> <span class="pk-mu">${pkPct(s.pko, s.old)}</span></td><td class="n"><b>${pkF(g)}/${pkF(tt)}</b> <span class="pk-mu">${pkPct(g, tt)}</span></td></tr>`;
+    };
+    // bảng shop của bưu cục đang chọn
+    const rec = P.map.get(`${P.off}|${D}`), recC = cmpD.map(([lb, dt]) => ({ lb, dt, r: P.map.get(`${P.off}|${dt}`) }));
+    const shopRows = rec ? rec.sh.slice().sort((a, b) => (b[2] + b[3]) - (a[2] + a[3]) || a[0].localeCompare(b[0], 'vi')) : [];
+    const cmpCell = (c, name, neu) => { if (!c.r) return '<td class="n"><span class="pk-fl" title="Chưa có số liệu ngày so sánh">—</span></td>'; const x = c.r.sh.find(z => z[0] === name); return `<td class="n">${pkDelta(neu - (x ? x[2] : 0))}</td>`; };
+    const srow = x => {
+      const tt = x[2] + x[3], g = x[4] + x[5];
+      return `<tr data-a="pkShop" data-s="${esc(x[0])}" class="${x[0] === P.shop ? 'sel' : ''}"><td class="nm" title="${esc(x[0])}">${esc(x[0])}${pkTag(x[1])}</td><td class="n">${pkF(tt)}</td><td class="n">${pkF(x[3])}</td><td class="n"><b>${pkF(x[2])}</b></td>${recC.map(c => cmpCell(c, x[0], x[2])).join('')}<td class="n">${pkF(x[4])}/${pkF(x[2])}</td><td class="n">${pkF(x[5])}/${pkF(x[3])}</td><td class="n"><b>${pkF(g)}/${pkF(tt)}</b> <span class="pk-mu">${pkPct(g, tt)}</span></td><td class="n">${pkPill(x[6], x[7])}</td></tr>`;
+    };
+    // chi tiết shop (chỉ hiện khi bấm một shop)
+    let detail = '';
+    const sx = P.shop && rec ? rec.sh.find(z => z[0] === P.shop) : null;
+    if (sx) {
+      const m = pkMonth(P.map, P.off, P.shop, D), c = m.cur, p = m.prevSame, a = m.prevAll, dlt = c.neu - p.neu, dp = p.neu ? dlt / p.neu * 100 : 0;
+      const partial = c.have < c.need || p.have < p.need || a.have < a.need;
+      const mon = P.mon.run && P.mon.office === P.off ? `<span class="pk-mu"> · đang tải ngày còn thiếu ${P.mon.done}/${P.mon.total}…</span>` : (partial ? `<span class="pk-warn"> · mới có ${c.have}/${c.need} ngày tháng này, ${a.have}/${a.need} ngày tháng trước</span>` : '');
+      const mt = (k, v, s, cls) => `<div class="pk-m${cls ? ' ' + cls : ''}"><span class="k">${k}</span><span class="v">${v}</span><span class="s">${s}</span></div>`;
+      detail = `<section class="pk-box" id="pk-detail"><header><h2>Thống kê shop · ${esc(P.shop)} ${pkTag(sx[1])}<small class="pk-mu"> · ${esc(P.off)}</small>${mon}</h2><a href="#" data-a="pkShopClose" class="pk-x">Đóng ×</a></header>
+        <div class="pk-low"><div class="pk-tiles">
+          ${mt(`Tháng ${m.span.m} (1 → ${fmtDM(D)})`, `${pkF(c.neu)} đơn mới`, `PU ${pkF(c.pkn)} (${pkPct(c.pkn, c.neu)}) · đúng hạn ${pkPct(c.ot, c.den)}`, 'cur')}
+          ${mt(`Tháng ${m.span.pm} cùng kỳ (1 → ${pad(m.span.cut)}/${pad(m.span.pm)})`, `${pkF(p.neu)} đơn mới`, `PU ${pkF(p.pkn)} (${pkPct(p.pkn, p.neu)}) · đúng hạn ${pkPct(p.ot, p.den)}`)}
+          ${mt('Chênh lệch cùng kỳ', `<span class="${dlt > 0 ? 'pk-up' : dlt < 0 ? 'pk-dn' : 'pk-fl'}">${dlt > 0 ? '▲ +' : dlt < 0 ? '▼ −' : ''}${pkF(Math.abs(dlt))} đơn</span>`, p.neu ? `${dlt > 0 ? '+' : dlt < 0 ? '−' : ''}${Math.abs(dp).toFixed(1).replace('.', ',')}% so với tháng ${m.span.pm}` : `tháng ${m.span.pm} chưa có đơn`)}
+          ${mt(`Tổng đơn cả tháng ${m.span.pm}`, `${pkF(a.neu)} đơn`, `tháng ${m.span.m} mới đạt ${pkPct(c.neu, a.neu)} của con số này`)}
+        </div><div><div class="pk-leg"><span style="--k:#4c3a8f">Tháng ${m.span.m}</span><span style="--k:#d97706">Tháng ${m.span.pm}</span><span class="pk-mu">đơn mới mỗi ngày</span></div>${pkChart(m.curSeries, m.prevSeries, m.span)}</div></div></section>`;
+    }
+    // Top 20 shop theo sản lượng (tổng đơn mới) cả tháng: mùng 1 đến mùng 7 thống kê tháng trước, từ mùng 8 thống kê tháng này
+    let top20 = '';
+    if (P.top) {
+      const tl = top.list, S = tl.reduce((t, x) => { t.neu += x.neu; t.pkn += x.pkn; t.ot += x.ot; t.den += x.den; return t; }, { neu: 0, pkn: 0, ot: 0, den: 0 });
+      const tile = (lb, v, sb, cls) => `<div class="pk-m${cls ? ' ' + cls : ''}"><span class="k">${lb}</span><span class="v">${v}</span><span class="s">${sb}</span></div>`;
+      const rowT = (x, i) => `<tr><td class="pk-mu">${i + 1}</td><td class="nm" title="${esc(x.name)}">${esc(x.name)}${pkTag(x.t)}</td><td class="n"><b>${pkF(x.neu)}</b></td><td class="n">${pkF(x.neu / Math.max(1, top.dh))}</td><td class="n">${pkF(x.pkn)}/${pkF(x.neu)} ${pkPill(x.pkn, x.neu)}</td><td class="n">${pkPct(x.ot, x.den)}</td><td class="n">${pkPct(x.neu, top.all)}</td></tr>`;
+      top20 = `<section class="pk-box" id="pk-top"><header><h2>3. Top 20 shop sản lượng lớn nhất · tháng ${sp.month} (${fmtDM(sp.from)} → ${fmtDM(sp.to)}) · ${offs.length} bưu cục</h2><a href="#" data-a="pkTopClose" class="pk-x">Đóng ×</a></header>
+        <div class="pk-al info">${sp.prevMonth ? `Đang là đầu tháng (mùng 1 đến mùng 7) nên thống kê cả tháng ${sp.month}. Từ mùng 8 sẽ chuyển sang tháng mới.` : `Thống kê từ mùng 1 đến ${fmtDM(sp.to)}. Từ mùng 1 đến mùng 7 tháng sau sẽ chuyển sang thống kê cả tháng ${sp.month}.`} Xếp theo tổng đơn mới, không tính TikTok.</div>
+        ${topFull ? '' : `<div class="pk-al warn">Mới có ${top.have}/${top.need} lượt ngày × bưu cục nên top 20 chưa đủ. ${P.run ? 'Đang tải…' : '<a href="#" data-a="pkTopLoad">Bấm để tải phần còn thiếu</a>'}</div>`}
+        <div class="pk-tiles4">${tile('Tổng đơn mới 20 shop', pkF(S.neu), `chiếm ${pkPct(S.neu, top.all)} đơn mới của ${offs.length} bưu cục`, 'cur')}${tile('Đơn mới cả khu vực', pkF(top.all), `${top.dh} ngày có số liệu`)}${tile('PU đơn mới của 20 shop', pkPct(S.pkn, S.neu), `${pkF(S.pkn)}/${pkF(S.neu)}`)}${tile('PU đúng hạn, đơn mới', pkPct(S.ot, S.den), `${pkF(S.ot)}/${pkF(S.den)}`)}</div>
+        <div class="pk-sc"><table><thead><tr><th>#</th><th>Shop</th><th class="n">Đơn mới trong tháng</th><th class="n">TB/ngày</th><th class="n">PU đơn mới</th><th class="n">PU đúng hạn</th><th class="n">Tỉ trọng đơn mới</th></tr></thead><tbody>${tl.length ? tl.map(rowT).join('') : '<tr><td colspan="7" class="pk-mu">Chưa có số liệu.</td></tr>'}</tbody></table></div></section>`;
+    }
+    const bads = have.filter(o => P.map.get(`${o}|${D}`).bad.length).map(o => `${o}: ${P.map.get(`${o}|${D}`).bad.join('; ')}`);
+    const dt = new Date(keyToUTC(D) + 12 * 3600000), isToday = D >= today;
+    const status = `Đang xem: <b>${pkDay(D)}/${D.slice(0, 4)}</b>${cmpD.length ? ' · so với ' + cmpD.map(([lb, d]) => `<b>${lb} (${pkDay(d)})</b>`).join(' và ') : ''} · không tính đơn TikTok · ${have.length}/${offs.length} bưu cục có số liệu${P.prog ? ' · ' + esc(P.prog) : ''}${!P.run && P.at ? ` · cập nhật ${pad(new Date(P.at).getHours())}:${pad(new Date(P.at).getMinutes())}` : ''}`;
+    const errs = offs.filter(o => P.err[`${o}|${D}`] && !P.map.has(`${o}|${D}`));
+    box.innerHTML = `<div class="pk">
+      <div class="pk-ctl"><span class="pk-chip">Bưu cục: ${offs.length}/${allOffs.length} đã chọn <small>(đổi ở tab ANM)</small></span><label>Ngày <input type="date" id="pk-date" value="${esc(D)}" max="${esc(today)}"></label>
+        <label>So sánh <select id="pk-cmp"><option value="both" ${P.cmp === 'both' ? 'selected' : ''}>D-1 và W-1</option><option value="d1" ${P.cmp === 'd1' ? 'selected' : ''}>Chỉ D-1</option><option value="w1" ${P.cmp === 'w1' ? 'selected' : ''}>Chỉ W-1</option></select></label>
+        <span style="flex:1"></span><button class="pk-go" data-a="pkLoad" ${P.run ? 'disabled' : ''}>${P.run ? '⟳ đang tải…' : `⟳ Tải số liệu ${offs.length} bưu cục`}</button></div>
+      <div class="pk-st">${status}</div>
+      ${P.msg ? `<div class="pk-al bad">🔒 ${esc(P.msg)}</div>` : ''}${P.err0 ? `<div class="pk-al warn">${esc(P.err0)}</div>` : ''}${errs.length ? `<div class="pk-al bad">Không tải được: ${esc(errs.slice(0, 3).map(o => `${o} (${P.err[`${o}|${D}`]})`).join('; '))}${errs.length > 3 ? '…' : ''}</div>` : ''}${bads.length ? `<div class="pk-al warn">⚠ Số đếm lệch số tổng của Kanban, nên đối chiếu: ${esc(bads.join(' | '))}</div>` : ''}
+      <div class="pk-cards">${cards}</div>
+      ${al.length ? `<div class="pk-als">${al.join('')}</div>` : ''}
+      <section class="pk-box"><header><h2>1. Chỉ số lấy hàng theo bưu cục</h2><span class="pk-mu">Bấm tên bưu cục để xem shop bên dưới</span></header>
+        <div class="pk-sc"><table><thead><tr><th>Bưu cục</th><th class="n">Tổng</th><th>Cơ cấu <span class="pk-mu">(PU mới · PU cũ · chưa PU)</span></th><th class="n">Mới</th><th class="n">Cũ</th><th class="n">PU đơn mới</th><th class="n">PU đơn cũ</th><th class="n">Tổng PU thành công / tổng cần PU</th></tr></thead><tbody>${offs.map(orow).join('')}</tbody></table></div></section>
+      <section class="pk-box"><header><h2>2. Theo shop · ${esc(P.off)}</h2><span class="pk-mu">Bấm một shop để xem thống kê của shop đó bên dưới</span></header>
+        <div class="pk-sc"><table><thead><tr><th>Shop</th><th class="n">Cần PU</th><th class="n">Cũ</th><th class="n">Mới</th>${cmpD.map(([lb]) => `<th class="n">Mới so ${lb}</th>`).join('')}<th class="n">PU mới</th><th class="n">PU cũ</th><th class="n">PU thành công / tổng</th><th class="n">Đúng hạn</th></tr></thead><tbody>${shopRows.map(srow).join('') || `<tr><td colspan="${8 + cmpD.length}" class="pk-mu">${P.run ? 'đang tải…' : 'Chưa có số liệu của bưu cục này.'}</td></tr>`}</tbody></table></div></section>
+      ${detail}${top20}
+      <div class="pk-foot">ⓘ Mới/cũ theo ngày tạo đơn · PU = đã lấy (có giờ vào mạng) · đúng hạn bỏ đơn có cờ isCrossBorder (cách Kanban tính) · tháng = cộng đơn mới từng ngày, mỗi ngày chỉ tải một lần rồi lưu · không tính TikTok.</div></div>`;
+  }
+  async function onEnterPick() {
+    const P = state.pick; renderPick(); await pkEnsure(false);
+    if (P.shop) pkEnsureMonth(P.off).catch(() => {});
+  }
+  function onPickClick(e) {
+    const el = e.target.closest('[data-a]'); if (!el) return;
+    const P = state.pick, a = el.dataset.a;
+    if (a === 'pkOff') { P.off = el.dataset.o; P.shop = ''; renderPick(); }
+    else if (a === 'pkShop') { P.shop = P.shop === el.dataset.s ? '' : el.dataset.s; renderPick(); if (P.shop) { pkEnsureMonth(P.off).catch(() => {}); const d = $('#pk-detail'); if (d && d.scrollIntoView) d.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } }
+    else if (a === 'pkShopClose') { e.preventDefault(); P.shop = ''; renderPick(); }
+    else if (a === 'pkTop') { P.top = true; renderPick(); pkEnsureTop().catch(er => { P.msg = String(er && er.message || er); renderPick(); }); const d = $('#pk-top'); if (d && d.scrollIntoView) d.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    else if (a === 'pkTopLoad') { e.preventDefault(); pkEnsureTop().catch(er => { P.msg = String(er && er.message || er); renderPick(); }); }
+    else if (a === 'pkTopClose') { e.preventDefault(); P.top = false; renderPick(); }
+    else if (a === 'pkLoad') { pkEnsure(true).then(() => { if (P.shop) pkEnsureMonth(P.off); }).catch(() => {}); }
+  }
+  function onPickChange(e) {
+    const P = state.pick, t = e.target;
+    if (t.id === 'pk-date') { if (/^\d{4}-\d{2}-\d{2}$/.test(t.value)) { P.date = t.value >= dateKey(new Date()) ? '' : t.value; P.shop = ''; renderPick(); pkEnsure(false); } }
+    else if (t.id === 'pk-cmp') { P.cmp = t.value; renderPick(); pkEnsure(false); }
+  }
+
+  function b5Actual(recs) {
+    if (!Array.isArray(recs) || !recs.length) return null;
+    const dates = recs.map(r => r && r.date).filter(Boolean).sort(), last = dates[dates.length - 1];
+    let sum = 0, n = 0;
+    for (const r of recs) if (r && r.date === last && r.backlog && Number.isFinite(r.backlog.d5)) { sum += r.backlog.d5; n++; }
+    return n ? sum : null;
+  }
+  const b5Color = v => v > 20 ? '#dc2626' : v >= 10 ? '#d97706' : '#16a34a';
+  // rows: d.rows của tab ANM (đã chỉ gồm bưu cục đang tick); trả về danh sách xếp từ nhiều đến ít, bưu cục chưa có số để cuối
+  function b5Rows(rows) {
+    const list = (rows || []).map(r => ({ o: r.office, v: b5Actual(r.recs) }));
+    list.sort((a, b) => (a.v === null) - (b.v === null) || (b.v ?? 0) - (a.v ?? 0) || a.o.localeCompare(b.o, 'vi'));
+    const have = list.filter(x => x.v !== null);
+    return { list, total: have.length ? have.reduce((t, x) => t + x.v, 0) : null, miss: list.length - have.length };
+  }
+  function b5Canvas(res, title, sub) {
+    const S = 2, W = 560, PADX = 18, HEAD = 70, TH = 36, ROW = 50, FOOT = 30, n = res.list.length + 1;
+    const H = HEAD + TH + ROW * n + FOOT, c = document.createElement('canvas');
+    c.width = W * S; c.height = H * S;
+    const g = c.getContext('2d'); g.scale(S, S);
+    const F = '"Segoe UI",Roboto,Arial,sans-serif';
+    const rr = (x, y, w, h, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); };
+    g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+    g.save(); rr(1, 1, W - 2, H - 2, 14); g.clip();
+    const gr = g.createLinearGradient(0, 0, W, HEAD); gr.addColorStop(0, '#667eea'); gr.addColorStop(1, '#764ba2');
+    g.fillStyle = gr; g.fillRect(0, 0, W, HEAD);
+    g.textBaseline = 'alphabetic'; g.fillStyle = '#ffe58a'; g.font = `700 24px ${F}`; g.fillText(title, PADX, 34);
+    g.fillStyle = '#ffffff'; g.font = `400 14px ${F}`; g.fillText(sub, PADX, 56);
+    g.fillStyle = '#eef0ff'; g.fillRect(0, HEAD, W, TH);
+    g.fillStyle = '#4c3a8f'; g.font = `700 14px ${F}`; g.textAlign = 'left'; g.fillText('Bưu cục', PADX, HEAD + 23);
+    g.textAlign = 'right'; g.fillText('Đơn backlog', W - PADX, HEAD + 23);
+    res.list.forEach((x, i) => {
+      const y = HEAD + TH + ROW * i;
+      g.strokeStyle = '#e5e7eb'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y + ROW - .5); g.lineTo(W, y + ROW - .5); g.stroke();
+      g.textAlign = 'left'; g.fillStyle = '#1f2937'; g.font = `600 19px ${F}`; g.fillText(x.o, PADX, y + 32);
+      g.textAlign = 'right'; g.font = `800 25px ${F}`;
+      g.fillStyle = x.v === null ? '#9ca3af' : b5Color(x.v); g.fillText(x.v === null ? '—' : String(Math.round(x.v)), W - PADX, y + 34);
+    });
+    const ty = HEAD + TH + ROW * res.list.length;
+    g.fillStyle = '#f3f0ff'; g.fillRect(0, ty, W, ROW); g.fillStyle = '#4c3a8f'; g.fillRect(0, ty, W, 2);
+    g.textAlign = 'left'; g.fillStyle = '#1f2937'; g.font = `800 19px ${F}`; g.fillText('TỔNG', PADX, ty + 32);
+    g.textAlign = 'right'; g.font = `800 25px ${F}`; g.fillText(res.total === null ? '—' : String(Math.round(res.total)), W - PADX, ty + 34);
+    g.fillStyle = '#fafafa'; g.fillRect(0, ty + ROW, W, FOOT);
+    g.textAlign = 'left'; g.fillStyle = '#6b7280'; g.font = `400 12px ${F}`; g.fillText('Đơn chưa giao thành công, ngày cần phát cách hôm nay từ 5 ngày trở lên', PADX, ty + ROW + 20);
+    g.restore();
+    g.strokeStyle = '#4c3a8f'; g.lineWidth = 2; rr(1, 1, W - 2, H - 2, 14); g.stroke();
+    return c;
+  }
+  async function b5Shot() {
+    const a = state.anm, d = anmData(), now = new Date();
+    if (!d || !d.rows || !d.rows.length) { log('Chưa có số liệu để chụp. Bấm “Tải số liệu” trước.', true); return; }
+    const res = b5Rows(d.rows);
+    if (res.total === null) { log('Chưa có số Backlog 5 ngày của bưu cục nào để chụp.', true); return; }
+    const c = b5Canvas(res, 'Backlog 5 ngày', `Khu vực ${REGION} · ${pad(now.getHours())}:${pad(now.getMinutes())} ${fmtDMY(dateKey(now))}`);
+    const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+    if (!blob) { log('Không tạo được ảnh.', true); return; }
+    let ok = false;
+    try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); ok = true; } catch { /* tải về */ }
+    if (!ok) {
+      try { const u = URL.createObjectURL(blob), el = document.createElement('a'); el.href = u; el.download = `Backlog5ngay_${dateKey(now)}.png`; document.body.appendChild(el); el.click(); el.remove(); setTimeout(() => URL.revokeObjectURL(u), 4000); a.shotMsg = 'Trình duyệt không cho copy ảnh, đã tải ảnh về máy.'; }
+      catch { a.shotMsg = 'Không copy được ảnh.'; }
+    } else a.shotMsg = 'Đã copy ảnh, mở Zalo bấm Ctrl+V để dán.';
+    a.shotAt = Date.now(); log(a.shotMsg, !ok && /Không copy/.test(a.shotMsg));
+    setTimeout(() => { if (state.view === 'anm') renderAnm(); }, 4200);
+    renderAnm();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * v3.28: danh sách đơn BACKLOG 5 NGÀY từng bưu cục (ngày cần phát cách hôm nay từ 5 ngày trở lên và chưa giao thành công,
+   * đúng định nghĩa của cột “Backlog 5 ngày”; cột “Trễ” cho biết số ngày quá hạn).
+   * Chỉ tải khi bấm nút. Mỗi bưu cục giữ MỘT danh sách (IndexedDB b8s-bl): tải lại sẽ GHI ĐÈ danh sách cũ.
+   * ------------------------------------------------------------------ */
+  const BL_MIN = 5;   // chỉ lấy đơn backlog từ 5 ngày trở lên (đúng cột “Backlog 5 ngày”)
+  // Địa chỉ giao: đọc từ nhật ký hoạt động của đơn (cột “Ghi chú” của dòng sortingCode) qua billBasicInfo, đúng nội dung trang tra cứu đơn đang hiện cho tài khoản này.
+  // Chỉ giữ trong bộ nhớ của phiên (không lưu vào IndexedDB). KHÔNG đọc số điện thoại, tên người nhận, không giải mã/mở che.
+  const BL_API_BILL = '/v9-order/tracking/billBasicInfo';
+  const BLA = { map: new Map(), run: null, err: '' };
+  function blAddrOf(logs) {
+    const arr = Array.isArray(logs) ? logs : [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const l = arr[i];
+      if (!l || l.operationName !== 'sortingCode') continue;
+      const u = String(l.udf4 ?? '').trim();
+      if (u) return u.normalize('NFC');
+      const m = String(l.reMark ?? '').split(';')[0];
+      if (m.trim()) return m.replace(/,+/g, ', ').replace(/\s+/g, ' ').trim().normalize('NFC');
+    }
+    return '';
+  }
+  async function blAddrFetch(office) {
+    const rec = BL.map.get(office); if (!rec || BLA.run || BL.run) return;
+    const codes = rec.items.map(x => x[0]).filter(Boolean);
+    BLA.run = { o: office, i: 0, n: codes.length }; BLA.err = ''; blRender();
+    let p = 0, bad = 0, auth = false;
+    const worker = async () => {
+      while (p < codes.length && !auth) {
+        const c = codes[p++];
+        try {
+          const d = await apiPost(BL_API_BILL, { billCode: c }), b = (d && d.taoBaoBillVo) || {};
+          BLA.map.set(c, { addr: blAddrOf(d && d.taobaoStatusLogVos), area: [b.consigneeCity, b.consigneeProv].map(x => String(x ?? '').trim()).filter(Boolean).join(', ') });
+        } catch (e) { bad++; if (isAuthError(e)) auth = true; }
+        BLA.run.i++; if (BLA.run.i % 4 === 0) blRender();
+      }
+    };
+    try { await Promise.all([worker(), worker(), worker(), worker()]); }
+    finally { BLA.run = null; BLA.err = auth ? 'Cần đăng nhập lại trang 800BEST để lấy địa chỉ.' : bad ? `Chưa lấy được địa chỉ của ${bad}/${codes.length} đơn.` : ''; blRender(); }
+  }
+  const blHasAddr = rec => !!rec && rec.items.some(x => BLA.map.has(x[0]));
+  const blAddrText = a => a ? ([a.addr, a.area && !(a.addr || '').includes(a.area.split(',')[0]) ? a.area : ''].filter(Boolean).join(' · ') || a.area || '') : '';
+  const BL = { map: new Map(), ready: false, run: null, open: '', msg: '', err: '', copied: '', show: false };
+  // Hiện trong cửa sổ nổi (không chiếm chỗ trong trang ANM để trang vẫn vừa một màn hình)
+  function blRender() {
+    let ov = document.getElementById('b8s-bl');
+    if (!BL.show) { if (ov) ov.remove(); return; }
+    if (!ov) {
+      const app = document.getElementById('b8s-app'); if (!app) return;
+      ov = document.createElement('div'); ov.id = 'b8s-bl'; app.appendChild(ov);
+      ov.addEventListener('click', e => { if (e.target === ov) { BL.show = false; blRender(); return; } const el = e.target.closest('[data-a]'); if (el) blAction(el.dataset.a, el); });
+    }
+    const keep = ov.querySelector('.blp'), st = keep ? keep.scrollTop : 0;
+    ov.innerHTML = blPanelHtml();
+    const np = ov.querySelector('.blp'); if (np && st) np.scrollTop = st;
+  }
+  function blListOf(orders, tiktok, statusMap, now) {
+    const H = orders.headers.map(h => String(h ?? '').normalize('NFC')), wb = orders.wbCol, rows = orders.rows;
+    const stCol = colBy(H, /trạng thái/i), scCol = colBy(H, /người quét|nhân viên|shipper|người phát|giao nhận/i), dCol = colBy(H, /ngày cần phát/i);
+    if (dCol < 0) return null;
+    const out = [];
+    for (const r of rows) {
+      const back = daysBefore(r[dCol], now);
+      if (back === null || back < BL_MIN) continue;
+      if ((stCol >= 0 ? classify(r[stCol], statusMap) : 'other') === 'ok') continue;
+      out.push([String(r[wb] ?? '').trim(), String(r[dCol] ?? '').trim(), back, stCol >= 0 ? String(r[stCol] ?? '').trim() : '', scCol >= 0 ? String(r[scCol] ?? '').trim() : '', isTikTok(r[wb], tiktok) ? 1 : 0]);
+    }
+    out.sort((a, b) => b[2] - a[2] || String(a[0]).localeCompare(String(b[0])));
+    return out;
+  }
+  function makeBlStore(factory) {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const rq = factory.open('b8s-bl', 1);
+      rq.onupgradeneeded = () => { const db = rq.result; if (!db.objectStoreNames.contains('off')) db.createObjectStore('off', { keyPath: 'office' }); };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => { dbp = null; rej(rq.error || new Error('Không mở được kho danh sách backlog')); };
+      rq.onblocked = () => { dbp = null; rej(new Error('Kho danh sách backlog đang bị tab khác giữ')); };
+    }));
+    const tx = async (mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction('off', mode); let out; const r = fn(t.objectStore('off'));
+        if (r) r.onsuccess = () => { out = r.result; };
+        t.oncomplete = () => res(out); t.onerror = t.onabort = () => rej(t.error || new Error('Lỗi ghi kho danh sách backlog'));
+      });
+    };
+    return { all: () => tx('readonly', st => st.getAll()), put: r => tx('readwrite', st => { st.put(r); }) };
+  }
+  const blStore = (() => { try { return makeBlStore(indexedDB); } catch { return null; } })();
+  let blEnsuring = false;
+  function blEnsure() {
+    if (BL.ready || blEnsuring) return;
+    blEnsuring = true;
+    (async () => {
+      try { for (const r of (blStore ? await blStore.all() : []) || []) if (r && r.office && Array.isArray(r.items)) BL.map.set(r.office, r); }
+      catch (e) { BL.err = `Không đọc được kho danh sách backlog: ${e.message}`; }
+      BL.ready = true; blEnsuring = false;
+      blRender();
+    })();
+  }
+  const blAt = ms => { const d = new Date(ms); return Number.isFinite(+d) ? `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} ${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}` : ''; };
+  async function blLoadOne(office) {
+    const { t } = await apiFetchOffice(office), now = new Date();
+    const items = blListOf(t.orders, parseList(state.tiktok), state.statusMap, now);
+    if (!items) throw new Error('đơn không có cột “Ngày cần phát”');
+    const rec = { office, at: now.getTime(), items };
+    if (blStore) { try { await blStore.put(rec); } catch (e) { BL.err = `Không lưu được danh sách ${office}: ${e.message}`; } }
+    BL.map.set(office, rec);   // ghi đè danh sách cũ của bưu cục này
+    return rec;
+  }
+  async function blLoad(list) {
+    if (BL.run) return;
+    BL.run = { i: 0, n: list.length, cur: '' }; BL.msg = ''; BL.err = ''; blRender();
+    const bad = [];
+    for (let i = 0; i < list.length; i++) {
+      BL.run.i = i; BL.run.cur = list[i]; blRender();
+      try { await blLoadOne(list[i]); } catch (e) { bad.push(`${list[i]}: ${e && e.message || e}`); if (isAuthError(e)) break; }
+    }
+    BL.run = null;
+    BL.msg = bad.length ? '' : `Đã tải xong ${list.length} bưu cục.`;
+    if (bad.length) BL.err = `Chưa tải được: ${bad.join('; ')}`;
+    blRender();
+  }
+  const blCodes = rec => rec.items.map(x => x[0]).join('\n');
+  const blCsv = rec => { const A = blHasAddr(rec); return '﻿' + [['Mã vận đơn', 'Ngày cần phát', 'Trễ (ngày)', 'Trạng thái', 'Người quét mới nhất', 'TikTok'].concat(A ? ['Địa chỉ giao'] : [])].concat(rec.items.map(x => [x[0], x[1], x[2], x[3], x[4], x[5] ? 'Có' : ''].concat(A ? [blAddrText(BLA.map.get(x[0]))] : []))).map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n'); };
+  function blPanelHtml() {
+    blEnsure();
+    const offs = anmOffices().filter(o => anmSel().has(o));
+    if (!offs.length) return '';
+    const run = BL.run, rowH = o => {
+      const rec = BL.map.get(o), n = rec ? rec.items.length : 0;
+      const busy = !!run, cur = run && run.cur === o;
+      return `<div class="blr${BL.open === o ? ' on' : ''}"><b class="blo">${esc(o)}</b><span class="bln">${rec ? `<b>${fmt(n)}</b> đơn <small>· tải lúc ${blAt(rec.at)}</small>` : '<small>chưa tải</small>'}</span>
+        <span class="blb"><button class="btn" data-a="blOne" data-o="${esc(o)}"${busy || BLA.run ? ' disabled' : ''}>${cur ? 'Đang tải…' : rec ? 'Tải lại' : 'Tải'}</button>${rec && rec.items.length ? `<button class="btn" data-a="blAddr" data-o="${esc(o)}"${busy || BLA.run ? ' disabled' : ''} title="Lấy địa chỉ giao của các đơn trong danh sách. Chỉ giữ trong phiên, không lưu.">${BLA.run && BLA.run.o === o ? `Địa chỉ ${BLA.run.i}/${BLA.run.n}…` : blHasAddr(rec) ? 'Tải lại địa chỉ' : 'Lấy địa chỉ'}</button>` : ''}${rec ? `<button class="btn" data-a="blView" data-o="${esc(o)}">${BL.open === o ? 'Ẩn' : 'Xem'}</button><button class="btn" data-a="blCopy" data-o="${esc(o)}">${BL.copied === o ? '✔ Đã copy' : 'Copy mã'}</button><button class="btn" data-a="blCsv" data-o="${esc(o)}">CSV</button>` : ''}</span></div>`;
+    };
+    const rec = BL.open ? BL.map.get(BL.open) : null;
+    const hasA = blHasAddr(rec);
+    const tbl = rec ? `<div class="blt"><table><thead><tr><th>#</th><th>Mã vận đơn</th><th>Ngày cần phát</th><th>Trễ</th><th>Trạng thái</th><th>Người quét mới nhất</th><th>TikTok</th>${hasA ? '<th>Địa chỉ giao</th>' : ''}</tr></thead><tbody>${rec.items.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x[0])}</td><td>${esc(x[1])}</td><td><b>${x[2]}</b> ngày</td><td>${esc(x[3])}</td><td>${esc(x[4])}</td><td>${x[5] ? '✔' : ''}</td>${hasA ? `<td class="bla">${BLA.map.has(x[0]) ? esc(blAddrText(BLA.map.get(x[0]))) : '…'}</td>` : ''}</tr>`).join('') || `<tr><td colspan="${hasA ? 8 : 7}">Không có đơn backlog.</td></tr>`}</tbody></table></div>` : '';
+    return `<div class="b8s-panel blp"><div class="anm-hd" style="margin:0 0 6px"><h3 style="margin:0">Danh sách đơn backlog từng bưu cục</h3><span style="display:flex;gap:6px"><button class="btn" data-a="blClose">✕ Đóng</button><button class="btn solid" data-a="blAll"${run ? ' disabled' : ''}>${run ? `Đang tải ${run.i + 1}/${run.n}…` : `Tải tất cả (${offs.length} bưu cục)`}</button></span></div>
+      <div class="muted" style="font-size:12px;margin-bottom:6px">Đơn backlog 5 ngày: ngày cần phát cách hôm nay từ 5 ngày trở lên và chưa giao thành công. Chỉ tải khi bấm. Tải lại bưu cục nào thì danh sách cũ của bưu cục đó bị ghi đè.</div>
+      ${BL.err ? `<div class="al a">${esc(BL.err)}</div>` : ''}${BLA.err ? `<div class="al a">${esc(BLA.err)}</div>` : ''}${BL.msg ? `<div class="al ok">✔ ${esc(BL.msg)}</div>` : ''}
+      ${offs.map(rowH).join('')}${tbl}</div>`;
+  }
+  function blAction(act, el) {
+    const o = el.dataset.o, rec = o ? BL.map.get(o) : null;
+    if (act === 'blAll') blLoad(anmOffices().filter(x => anmSel().has(x))).catch(er => { BL.run = null; BL.err = er.message; blRender(); });
+    else if (act === 'blOne') blLoad([o]).catch(er => { BL.run = null; BL.err = er.message; blRender(); });
+    else if (act === 'blAddr') blAddrFetch(o).catch(er => { BLA.run = null; BLA.err = er.message; blRender(); });
+    else if (act === 'blClose') { BL.show = false; blRender(); }
+    else if (act === 'blView') { BL.open = BL.open === o ? '' : o; blRender(); }
+    else if (act === 'blCopy' && rec) copyText(blCodes(rec)).then(ok => { if (ok) { BL.copied = o; setTimeout(() => { BL.copied = ''; blRender(); }, 2600); } blRender(); });
+    else if (act === 'blCsv' && rec) { const d = new Date(rec.at); downloadText(`Backlog_${o.replace(/\s+/g, '_')}_${String(d.getDate()).padStart(2, '0')}${String(d.getMonth() + 1).padStart(2, '0')}${d.getFullYear()}.csv`, blCsv(rec), 'text/csv;charset=utf-8'); }
+  }
+
   function renderThresholds() {
     const box = $('#b8s-th');
     if (!box) return;
@@ -2677,30 +3575,211 @@
     if (!state.orders) return null;
     const key = [state.orders.at.getTime(), state.emp ? state.emp.at.getTime() : 0, state.tiktok, JSON.stringify(state.statusMap), JSON.stringify(state.dm), new Date().toDateString()].join('|');
     if (state.calcKey !== key) {
-      state.calc = computeDashboard({ orders: state.orders, emp: state.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now: new Date(), rules: state.dm });
+      state.calc = computeDashboard({ orders: state.orders, emp: state.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now: new Date(), rules: state.dm, skip: shipSkipFn(state.office) });
       state.calcKey = key;
     }
     return state.calc;
   }
 
+  /* ------------------------------------------------------------------ *
+   * Bảng Shipper: cột "Tỉ lệ giao Tuần" và "Tỉ lệ giao Tháng" (chỉ tải khi bấm nút)
+   * Nguồn: danh sách đơn Kanban của từng ngày (mỗi đơn có mã ship và trạng thái ký nhận).
+   * Tuần = tuần trước (T2 đến CN); tháng = từ mùng 1 đến hôm qua. Tính cả đơn TikTok.
+   * Tỉ lệ = tổng đơn đã ký nhận / tổng đơn của ship, cộng dồn các ngày. Chỉ lưu số tổng theo ship và ngày.
+   * ------------------------------------------------------------------ */
+  const SH_KEEP = 75, SH_WORKERS = 3;
+  // Các ngày của kỳ: w = tuần trước, m = từ mùng 1 đến hôm qua
+  function shDays(p, today) {
+    if (p === 'w') {
+      const dow = new Date(keyToUTC(today)).getUTCDay(), w0 = addDays(addDays(today, -((dow + 6) % 7)), -7);
+      return Array.from({ length: 7 }, (_, i) => addDays(w0, i));
+    }
+    const m0 = `${today.slice(0, 8)}01`, n = Math.round((keyToUTC(today) - keyToUTC(m0)) / 86400000);
+    return Array.from({ length: n }, (_, i) => addDays(m0, i));
+  }
+  // Gộp danh sách đơn một ngày thành { mã ship: [tổng đơn, đã ký nhận] }
+  function shAggregate(items) {
+    const seen = new Set(), out = {};
+    for (const r of items || []) {
+      if (!r || typeof r !== 'object') continue;
+      const b = r.billCode ? String(r.billCode) : '';
+      if (b) { if (seen.has(b)) continue; seen.add(b); }
+      const code = shipKeys(r.smallManCode).code;
+      if (!code) continue;
+      const x = out[code] || (out[code] = [0, 0]);
+      x[0]++; if (Number(r.isSign) === 1) x[1]++;
+    }
+    return out;
+  }
+  // Cộng các ngày của một kỳ cho từng mã ship; days thiếu thì trả về thiếu
+  function shPeriod(map, office, days) {
+    const by = {}; let have = 0;
+    for (const d of days) {
+      const r = map.get(`${office}|${d}`); if (!r) continue;
+      have++;
+      for (const [c, v] of Object.entries(r.s)) { const x = by[c] || (by[c] = [0, 0]); x[0] += v[0]; x[1] += v[1]; }
+    }
+    return { by, have, need: days.length };
+  }
+  const shPct = (ok, tot) => tot > 0 ? `${(ok / tot * 100).toFixed(2).replace('.', ',')}%` : '—';
+  function makeShStore(factory) {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const rq = factory.open('b8s-sh', 1);
+      rq.onupgradeneeded = () => { const db = rq.result; if (!db.objectStoreNames.contains('days')) db.createObjectStore('days', { keyPath: 'id' }); };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => { dbp = null; rej(rq.error || new Error('Không mở được kho số liệu ship')); };
+      rq.onblocked = () => { dbp = null; rej(new Error('Kho số liệu ship đang bị tab khác giữ')); };
+    }));
+    const tx = async (mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction('days', mode); let out; const r = fn(t.objectStore('days'));
+        if (r) r.onsuccess = () => { out = r.result; };
+        t.oncomplete = () => res(out); t.onerror = t.onabort = () => rej(t.error || new Error('Lỗi ghi kho số liệu ship'));
+      });
+    };
+    return { all: () => tx('readonly', st => st.getAll()), put: r => tx('readwrite', st => { st.put(r); }), delMany: ids => tx('readwrite', st => { ids.forEach(i => st.delete(i)); }) };
+  }
+  const shStore = (() => { try { return makeShStore(indexedDB); } catch { return null; } })();
+  const shOn = () => !!state.office && !isFS(state.office);
+  async function shLoadStore() {
+    const S = state.sh; if (S.ready) return;
+    if (shStore) {
+      try {
+        const lim = addDays(dateKey(new Date()), -SH_KEEP), dead = [];
+        for (const r of (await shStore.all()) || []) {
+          if (!r || !r.id || !r.s || typeof r.s !== 'object') { if (r && r.id) dead.push(r.id); continue; }
+          if (r.date < lim) dead.push(r.id); else S.map.set(r.id, r);
+        }
+        if (dead.length) await shStore.delMany(dead);
+      } catch (e) { S.err0 = `Không đọc được kho số liệu ship: ${e.message}`; }
+    }
+    S.ready = true;
+  }
+  let shRedrawT = 0;
+  function shRedraw(now) {
+    if (state.view !== 'dash') return;
+    if (now) { clearTimeout(shRedrawT); shRedrawT = 0; renderDashboard(); return; }
+    if (!shRedrawT) shRedrawT = setTimeout(() => { shRedrawT = 0; if (state.view === 'dash') renderDashboard(); }, 300);
+  }
+  // Bấm nút tải: chỉ gọi dữ liệu của bưu cục đang xem, chỉ cho kỳ được bấm
+  async function shLoad(p) {
+    const S = state.sh, office = state.office;
+    if (!office || isFS(office) || S.run[p]) return;
+    if (!state.fast) { S.msg = 'Đang tắt “Tải nhanh bằng API” trong Cài đặt nên không tải được số liệu ship.'; shRedraw(true); return; }
+    await shLoadStore();
+    const today = dateKey(new Date()), days = shDays(p, today);
+    S.msg = '';
+    if (!days.length) { S.res[`${office}|${p}`] = { at: Date.now(), days, empty: true }; shRedraw(true); return; }
+    const force = !!(S.res[`${office}|${p}`] && S.res[`${office}|${p}`].at);
+    const jobs = days.filter(d => force ? true : !S.map.has(`${office}|${d}`));
+    S.run[p] = true; S.prog[p] = `Đang tải 0/${jobs.length}…`; shRedraw(true);
+    let i = 0, done = 0, stop = false;
+    const worker = async () => {
+      while (!stop && i < jobs.length) {
+        const d = jobs[i++];
+        try {
+          const site = await resolveSite(office), day = await kbFetchDay(site.code, d, true);
+          const rec = { id: `${office}|${d}`, office, date: d, at: Date.now(), s: shAggregate(day.items), n: day.items.length, total: day.total };
+          S.map.set(rec.id, rec);
+          if (shStore) { try { await shStore.put(rec); } catch (e) { S.err0 = `Không lưu được số liệu ship: ${e.message}`; } }
+        } catch (e) {
+          stop = true; S.msg = isAuthError(e) ? 'Cần đăng nhập lại trang 800BEST để lấy số liệu ship.' : `Không tải được ngày ${fmtDM(d)}: ${e.message}`;
+        }
+        done++; S.prog[p] = `Đang tải ${done}/${jobs.length}…`; shRedraw();
+      }
+    };
+    try { await Promise.all(Array.from({ length: Math.min(SH_WORKERS, jobs.length) }, worker)); }
+    finally {
+      S.run[p] = false; S.prog[p] = '';
+      if (days.every(d => S.map.has(`${office}|${d}`))) S.res[`${office}|${p}`] = { at: Date.now(), days };
+      shRedraw(true);
+    }
+  }
+  // Ô tỉ lệ của một ship (null = chưa bấm tải)
+  function shCell(r, p) {
+    const S = state.sh, res = S.res[`${state.office}|${p}`];
+    if (!res) return '<td class="sh-e"></td>';
+    if (res.empty) return '<td class="sh-na">chưa có ngày nào</td>';
+    const c = shipKeys(r.name).code, v = c ? shPeriod(S.map, state.office, res.days).by[c] : null;
+    if (!v || !v[0]) return '<td class="sh-na">không có số liệu</td>';
+    return `<td class="${rateClass(v[1] / v[0] * 100, 'high')}">${esc(shPct(v[1], v[0]))}<small>${fmt(v[1])}/${fmt(v[0])}</small></td>`;
+  }
+  function shTotalCell(rows, p) {
+    const S = state.sh, res = S.res[`${state.office}|${p}`];
+    if (!res) return '<td class="sh-e"></td>';
+    if (res.empty) return '<td class="sh-na">—</td>';
+    const by = shPeriod(S.map, state.office, res.days).by; let ok = 0, tot = 0;
+    for (const r of rows) { const c = shipKeys(r.name).code, v = c ? by[c] : null; if (v) { tot += v[0]; ok += v[1]; } }
+    return tot ? `<td class="${rateClass(ok / tot * 100, 'high')}">${esc(shPct(ok, tot))}<small>${fmt(ok)}/${fmt(tot)}</small></td>` : '<td class="sh-na">—</td>';
+  }
+  function shHead(p, label) {
+    const S = state.sh, res = S.res[`${state.office}|${p}`], run = S.run[p];
+    const t = run ? S.prog[p] : res ? `Tải lại · ${pad(new Date(res.at).getHours())}:${pad(new Date(res.at).getMinutes())}` : 'Tải dữ liệu';
+    return `<th class="g-sh">${label} <button class="sh-ld" data-sh="${p}" ${run ? 'disabled' : ''}>${esc(t)}</button></th>`;
+  }
+
+  // Nhãn rút gọn cho dòng phụ của thẻ chỉ số (đầy đủ nằm trong chú thích khi rê chuột)
+  const CARD_ABBR = { 'Giao thành công': 'GTC', 'Tổng đơn mới hôm nay': 'đơn mới', 'Chờ duyệt': 'duyệt', 'Giao thất bại': 'thất bại', 'Nhập kho chưa quét phát': 'kho' };
   function rateClass(v, good) {
     if (typeof v !== 'number' || !Number.isFinite(v)) return '';
     if (good === 'low') return v <= 10 ? 'r-ok' : v <= 20 ? 'r-mid' : 'r-bad';
     return v >= 75 ? 'r-ok' : v >= 60 ? 'r-mid' : 'r-bad';
   }
 
+  // v3.31: xem lại ngày cũ ở tab Tổng quan, dựng từ bản ghi đã lưu của bưu cục đang chọn
+  function recToCalc(r) {
+    const kb = r.rb === 'kb';
+    const card = a => ({
+      pod: ratio(a.newOk, a.newTotal), newOk: a.newOk, newTotal: a.newTotal, newUns: null, newScan: null,
+      total: a.total, unscanned: kb ? null : a.unscanned, scanned: kb ? null : a.total - a.unscanned, ok: a.ok,
+      scanRate: kb ? null : ratio(a.total - a.unscanned, a.total),
+      perNV: r.nWork > 0 ? a.total / r.nWork : null,
+      gtcTrip: kb ? null : ratio(a.ok, a.total - a.unscanned), gtcTotal: ratio(a.ok, a.total)
+    });
+    const shippers = r.ships.map(x => ({ name: x.n, matched: true, scanned: kb ? null : x.sc, ok: x.ok, ttTotal: kb ? null : x.tt, ttOk: kb ? null : x.tk,
+      rateTrip: kb ? null : ratio(x.ok, x.sc), rateTT: kb ? null : ratio(x.tk, x.tt) }));
+    const sum = k => shippers.reduce((a, x) => a + (Number.isFinite(x[k]) ? x[k] : 0), 0);
+    const totals = { name: 'TỔNG', scanned: kb ? null : sum('scanned'), ok: sum('ok'), ttTotal: kb ? null : sum('ttTotal'), ttOk: kb ? null : sum('ttOk') };
+    totals.rateTrip = kb ? null : ratio(totals.ok, totals.scanned); totals.rateTT = kb ? null : ratio(totals.ttOk, totals.ttTotal);
+    const all = card(r.all), tt = card(r.tt), sme = { unscanned: kb ? null : r.all.unscanned - r.tt.unscanned };
+    const at = r.savedAt ? new Date(r.savedAt) : null;
+    const notes = [`Đang xem bản đã lưu ngày ${fmtDM(r.date)}${at && !isNaN(at) ? ` (lưu lúc ${pad(at.getHours())}:${pad(at.getMinutes())})` : ''}. Bản lưu chỉ có số tổng và số theo shipper, không có danh sách đơn.`];
+    if (kb) notes.push('Bản này được dựng lại từ danh sách đơn của Kanban nên không có số quét giao (các ô liên quan để trống).');
+    return { cards: { all, tt, sme }, extra: { backlog: r.backlog, odrTT: r.odrTT, odr2: r.odr2 }, firstOk: r.firstOk, hasTT: tt.total > 0,
+      nWork: r.nWork, workersEstimated: r.workersEstimated, shippers, totals, notes };
+  }
+  function dashDayBar(today, past) {
+    const day = state.dashDay || today;
+    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 4px;color:#fff;font-size:12px;line-height:1.2"><label>Ngày <input type="date" id="b8s-dday" value="${esc(day)}" max="${today}"></label>${past ? '<span class="b8sbtn" id="b8s-dtoday">Về hôm nay</span><span class="muted">Đang xem số đã lưu, không phải số mới.</span>' : ''}</div>`;
+  }
+  function bindDashDay(box) {
+    const i = box.querySelector('#b8s-dday'), b = box.querySelector('#b8s-dtoday');
+    if (i) i.onchange = () => { const v = i.value, t = dateKey(new Date()); state.dashDay = v && v < t ? v : ''; renderDashboard(); };
+    if (b) b.onclick = () => { state.dashDay = ''; renderDashboard(); };
+  }
   function renderDashboard() {
     const box = $('#b8s-dash');
     if (!box) return;
-    const c = getCalc();
+    const today0 = dateKey(new Date());
+    if (state.dashDay && state.dashDay >= today0) state.dashDay = '';
+    const past = !!state.dashDay;
+    let c = null;
+    if (past) {
+      const rec = state.office ? state.hist.get(`${state.office}|${state.dashDay}`) || [...state.hist.values()].find(r => r.date === state.dashDay && sameOffice(r.office, state.office)) : null;
+      if (!rec) { box.innerHTML = dashDayBar(today0, true) + `<div class="b8s-empty"><b>Không có bản lưu ngày ${esc(fmtDM(state.dashDay))}${state.office ? ' của ' + esc(state.office) : ''}</b><br>${state.office ? 'Chọn ngày khác hoặc “Về hôm nay”.' : 'Chọn bưu cục ở thanh phía trên (bấm “Chuyển bưu cục”) để xem ngày cũ của bưu cục đó.'}</div>`; bindDashDay(box); return; }
+      c = recToCalc(rec);
+    } else c = getCalc();
+    const dayBar = dashDayBar(today0, past);
     if (!c) {
-      box.innerHTML = '<div class="b8s-empty"><b>Chưa có dữ liệu</b><br>Chọn bưu cục ở thanh phía trên rồi bấm “Chuyển bưu cục”. Script sẽ tự đọc toàn bộ số liệu (tab Tiến độ nhân viên, Chi tiết phát kiện) rồi quay về tab bạn đang xem.</div>';
-      return;
+      box.innerHTML = dayBar + '<div class="b8s-empty"><b>Chưa có dữ liệu</b><br>Chọn bưu cục ở thanh phía trên rồi bấm “Chuyển bưu cục”. Script sẽ tự đọc toàn bộ số liệu (tab Tiến độ nhân viên, Chi tiết phát kiện) rồi quay về tab bạn đang xem.</div>';
+      bindDashDay(box); return;
     }
     const cl = cardList(c);
     const card = ([label, v, kind, color, sub]) => (v === null || v === undefined || !Number.isFinite(v)) ? ''
-      : `<div class="b8s-card"><span>${esc(label)}</span><b class="c-${color}">${esc(fmtVal(v, kind))}</b>${
-          Array.isArray(sub) ? sub.map(([k, n]) => `<small>${esc(k)}: <i>${esc(fmt(n))}</i></small>`).join('') : ''}</div>`;
+      : `<div class="b8s-card" title="${esc(Array.isArray(sub) ? sub.map(([k, n]) => `${k}: ${fmt(n)}`).join(' · ') : label)}"><span>${esc(label)}</span><b class="c-${color}">${esc(fmtVal(v, kind))}</b><small>${
+          Array.isArray(sub) ? sub.map(([k, n]) => `${esc(CARD_ABBR[k] || k)} <i>${esc(fmt(n))}</i>`).join(' · ') : '&nbsp;'}</small></div>`;
     const cols = shipperCols(c);
     const gh = cols.filter(x => x.group === 'gh').length, tt = cols.filter(x => x.group === 'tt').length;
     const rows = sortRows(c.shippers, state.sort.key, state.sort.dir);
@@ -2711,14 +3790,29 @@
       if (x.kind === 'pct') return `<td class="${rateClass(v, x.good)}">${esc(fmtVal(v, 'pct'))}</td>`;
       return `<td>${esc(fmtVal(v, 'int'))}</td>`;
     };
-    const head2 = `<tr><th class="g-nav">#</th>${cols.map(x => th(x)).join('')}</tr>`;
-    const head1 = `<tr><th class="g-nav" colspan="2">Shipper đi làm: ${fmt(c.nWork)}${c.workersEstimated ? ' (ước tính)' : ''}</th>${gh ? `<th class="g-gh" colspan="${gh}">Chỉ số giao hàng</th>` : ''}${tt ? `<th class="g-tt" colspan="${tt}">Chỉ số TikTok Shop</th>` : ''}</tr>`;
-    const body = rows.map((r, i) => `<tr><td class="rk${i < 3 ? i + 1 : ''}">${i + 1}</td>${cols.map(x => td(x, r)).join('')}</tr>`).join('');
-    const total = `<tr class="total"><td></td>${cols.map(x => td(x, c.totals)).join('')}</tr>`;
+    const sho = !past && shOn(), ci = cols.findIndex(x => x.k === 'name') + 1;
+    const head2 = `<tr><th class="g-nav">#</th>${cols.map((x, i) => th(x) + (sho && i === ci - 1 ? (state.sh.hide ? '<th class="g-sh"><button class="sh-ld" data-shtog="1" title="Hiện lại hai cột tuần và tháng">Hiện</button></th>' : shHead('w', 'Tỉ lệ giao Tuần') + shHead('m', 'Tỉ lệ giao Tháng')) : '')).join('')}</tr>`;
+    const head1 = `<tr><th class="g-nav" colspan="2">Shipper đi làm: ${fmt(c.nWork)}${c.workersEstimated ? ' (ước tính)' : ''}</th>${sho ? (state.sh.hide ? '<th class="g-sh">Tỉ lệ giao</th>' : '<th class="g-sh" colspan="2">Tỉ lệ giao thành công <button class="sh-ld" data-shtog="1" title="Ẩn hai cột tuần và tháng (số đã tải vẫn giữ)">Ẩn</button></th>') : ''}${gh ? `<th class="g-gh" colspan="${gh}">Chỉ số giao hàng</th>` : ''}${tt ? `<th class="g-tt" colspan="${tt}">Chỉ số TikTok Shop</th>` : ''}</tr>`;
+    const body = rows.map((r, i) => `<tr><td class="rk${i < 3 ? i + 1 : ''}">${i + 1}</td>${cols.map((x, k) => td(x, r) + (sho && k === ci - 1 ? (state.sh.hide ? '<td class="sh-e"></td>' : shCell(r, 'w') + shCell(r, 'm')) : '')).join('')}</tr>`).join('');
+    const total = `<tr class="total"><td></td>${cols.map((x, k) => td(x, c.totals) + (sho && k === ci - 1 ? (state.sh.hide ? '<td class="sh-e"></td>' : shTotalCell(rows, 'w') + shTotalCell(rows, 'm')) : '')).join('')}</tr>`;
 
     // Đối chiếu với trang gốc
     const notes = [...c.notes];
-    const ov = state.ov;
+    if (!past && notes.some(t => /sai chức vụ/.test(t)) && state.emp && Array.isArray(state.emp.rows)) {   // chẩn đoán: cho thấy đúng giá trị “Chức vụ” đang đọc được để so với danh sách ở Cài đặt
+      const di = (state.emp.headers || []).findIndex(h => /chức vụ/i.test(String(h))), seen = new Map();
+      if (di >= 0) for (const r of state.emp.rows) { const v = String(r[di] ?? '').trim() || '(trống)'; seen.set(v, (seen.get(v) || 0) + 1); }
+      if (seen.size) notes.push(`Chức vụ đọc được từ hệ thống: ${[...seen].map(([k, n]) => `“${k}” ×${n}`).join(' · ')}. Nếu đúng là ship đi làm, vào Cài đặt thêm đúng dòng này vào “Chức vụ được tính” (hoặc tắt lọc chức vụ).`);
+    }
+    if (sho) {
+      const S = state.sh, rw = S.res[`${state.office}|w`], rm = S.res[`${state.office}|m`], tdy = dateKey(new Date());
+      if ((rw || rm) && !S.hide) {
+        const rg = r => r && r.days && r.days.length ? `${fmtDM(r.days[0])} đến ${fmtDM(r.days[r.days.length - 1])}` : '';
+        notes.push(`Tỉ lệ giao thành công${rw ? ` · tuần trước ${rg(rw)}` : ''}${rm ? ` · tháng ${rm.empty ? 'chưa có ngày nào (không gồm hôm nay)' : rg(rm) + ' (không gồm hôm nay)'}` : ''} · đã ký nhận / tổng đơn của ship, có cả đơn TikTok.`);
+      }
+      if (S.msg) notes.push(`⚠ ${S.msg}`);
+      if (S.err0) notes.push(`⚠ ${S.err0}`);
+    }
+    const ov = past ? null : state.ov;
     if (ov) {
       const chk = (label, a, b) => {
         if (!Number.isFinite(a)) return;
@@ -2728,13 +3822,13 @@
       chk('Đơn nhập kho chưa quét phát', ov.unscanned, c.cards.all.unscanned);
     }
 
-    const warn = state.pending ? `<div class="b8s-warn">⚠ Chưa lưu lịch sử: ${esc(state.pending.reason)} <button class="b8sbtn solid" data-act="force-save">Vẫn lưu</button></div>` : '';
-    box.innerHTML = `${warn}
-      <div class="b8s-sec">📦 Giao thường</div>
-      <div class="b8s-cards">${cl.main.map(card).join('')}</div>
-      ${c.hasTT ? `<div class="b8s-sec">🎵 TikTok Shop</div><div class="b8s-cards">${cl.tts.map(card).join('')}</div>` : ''}
+    const warn = (!past && state.pending) ? `<div class="b8s-warn">⚠ Chưa lưu lịch sử: ${esc(state.pending.reason)} <button class="b8sbtn solid" data-act="force-save">Vẫn lưu</button></div>` : '';
+    box.innerHTML = `${dayBar}${warn}
+      <div class="b8s-band"><div class="bl">📦 Giao thường</div>${cl.main.map(card).join('')}</div>
+      ${c.hasTT ? `<div class="b8s-band"><div class="bl">🎵 TikTok Shop</div>${cl.tts.map(card).join('')}</div>` : ''}
       <div class="b8s-tw"><table><thead>${head1}${head2}</thead><tbody>${body}${total}</tbody></table></div>
       ${notes.length ? `<div class="b8s-notes">${notes.map(n => `<div>${esc(n)}</div>`).join('')}</div>` : ''}`;
+    bindDashDay(box);
   }
 
   function renderSettings() {
@@ -2761,11 +3855,11 @@
     const box = $('#b8s-snapinfo'); if (!box) return;
     const S = state.snap, dates = [...new Set(S.list.map(r => r.date))].sort(), today = dateKey(new Date()), now = new Date();
     const todayTxt = SNAP_SLOTS.map(sl => { const st = slotState(today, sl, now, OFFICES, S.idx); return `${sl} ${st.st === 'ok' ? '✔' : st.st === 'part' ? `(${st.have}/${st.n})` : st.st === 'miss' ? 'lỡ' : st.st === 'due' ? 'đang chờ' : '–'}`; }).join(' · ');
-    box.innerHTML = `Tự lưu vào các mốc <b>${SNAP_SLOTS.join(', ')}</b> (giờ máy, kể cả Chủ nhật) khi trang 800BEST đang mở; mở trễ trong ${SNAP_WINDOW_MIN} phút sau mốc thì chạy bù. Giữ ${SNAP_KEEP_DAYS} ngày, cũ hơn tự xóa.<br>`
+    box.innerHTML = `Tự lưu số chốt ngày lúc <b>${SNAP_SLOTS.join(', ')}</b> (giờ máy, kể cả Chủ nhật) khi trang 800BEST đang mở; mở trễ trong ${SNAP_WINDOW_MIN} phút sau mốc thì chạy bù. Dùng để giữ số DM đi làm và giờ GTC đầu tiên của từng ngày. Giữ ${SNAP_KEEP_DAYS} ngày, cũ hơn tự xóa. Các bản chụp theo mốc giờ cũ vẫn còn trong trình duyệt nhưng không dùng nữa.<br>`
       + `Hôm nay: ${esc(todayTxt)}<br>Đang có ${S.list.length} bản chụp${dates.length ? ` (từ ${esc(fmtDMY(dates[0]))} đến ${esc(fmtDMY(dates[dates.length - 1]))})` : ''}.`
       + `${state.fast ? '' : '<br><b class="bad">Đang tắt “Tải nhanh bằng API” nên không tự lưu được.</b>'}${S.err ? `<br><b class="bad">${esc(S.err)}</b>` : ''}`
       + '<br>Mỗi bản chụp có thêm số liệu từng ship (tên, số quét, số giao thành công, giờ quét đầu) để phân tích nguyên nhân; không lưu mã vận đơn hay thông tin người nhận.'
-      + '<br>Lưu ý: tool chỉ chạy được khi máy bật, trình duyệt mở và đã đăng nhập 800BEST. Mốc nào lúc đó không mở trang thì bị lỡ và không bù lại được.';
+      + '<br>Lưu ý: tool chỉ chạy được khi máy bật, trình duyệt mở và đã đăng nhập 800BEST. Số hôm qua và tuần trước để so sánh được lấy tự động từ Kanban (xem mục “Dữ liệu so sánh” bên dưới).';
   }
 
   function renderBkInfo() {
@@ -2776,24 +3870,25 @@
   function renderUI() {
     if (!$('#b8s-app')) return;
     const title = $('#b8s-title'), sub = $('#b8s-sub');
-    $('#b8s-app').classList.toggle('anm', state.view === 'anm');
-    if (state.view === 'anm') { if (title) title.textContent = `📍 Thống kê Khu Vực${REGION ? ' ' + REGION : ''}`; }
+    $('#b8s-app').classList.toggle('anm', state.view === 'anm' || state.view === 'pick');
+    if (state.view === 'anm' || state.view === 'pick') { if (title) title.textContent = `📍 ${state.view === 'pick' ? 'Pickup-sale' : 'Thống kê'} Khu Vực${REGION ? ' ' + REGION : ''}`; }
     else if (title) title.textContent = state.office ? `📍 ${state.office}${state.province ? ' – ' + titleCase(state.province) : ''}` : '📊 Thống kê tổng quan';
     if (state.office && document.activeElement !== $('#b8s-office-in')) renderOfficeList();
-    if (sub && state.view !== 'anm') {
+    if (sub && state.view !== 'anm' && state.view !== 'pick') {
       let t = state.lastRefresh ? `Cập nhật lúc ${state.lastRefresh.toLocaleTimeString('vi-VN')} ngày ${state.lastRefresh.toLocaleDateString('vi-VN')}` : 'Chưa tải dữ liệu';
       if (state.lastSaved) t += ` · đã lưu lịch sử ${pad(state.lastSaved.getHours())}:${pad(state.lastSaved.getMinutes())}`;
       if (backupInfo().due) t += ' · ⚠ nên sao lưu lịch sử';
       sub.textContent = t;
     }
-    ['dash', 'hist', 'anm', 'set'].forEach(v => {
+    ['dash', 'hist', 'anm', 'pick', 'set'].forEach(v => {
       const sec = $(`#b8s-v-${v}`); if (sec) sec.style.display = state.view === v ? 'block' : 'none';
     });
     document.querySelectorAll('#b8s-app .b8s-tab').forEach(t => t.classList.toggle('on', t.dataset.view === state.view));
     if (state.view === 'dash') renderDashboard();
     if (state.view === 'hist') renderHistory();
     if (state.view === 'anm') renderAnm();
-    if (state.view === 'set') { renderSettings(); renderSnapInfo(); renderWxInfo(); renderBkInfo(); }
+    if (state.view === 'pick') renderPick();
+    if (state.view === 'set') { renderSettings(); renderSnapInfo(); renderWxInfo(); renderBkInfo(); renderKbInfo(); }
     snapBadge();
   }
 
@@ -2841,7 +3936,7 @@
     if (state.lastRefresh) notes.push([`Dữ liệu đọc lúc: ${state.lastRefresh.toLocaleString('vi-VN')}`]);
     notes.push([`Mã vận đơn TikTok Shop: ${state.tiktok}`]);
     notes.push(['POD2400 = đơn mới hôm nay (Ngày cần phát hàng = hôm nay) giao thành công / tổng đơn mới hôm nay, tính cả đơn chưa quét giao. Backlog 3 ngày = đơn có Ngày cần phát cách hôm nay từ 3 ngày trở lên và chưa giao thành công. TikTok đến hạn ODR = đơn TikTok có Thời hạn giao hàng nội bộ là hôm nay.']);
-    notes.push(['GTC chuyến = đơn giao thành công / đơn đã quét giao; GTC Total = đơn giao thành công / tổng đơn cần phát. Tổng đơn TTS ở bảng shipper = đơn TikTok đã quét giao.']);
+    notes.push(['GTC chuyến = đơn giao thành công / đơn đã quét giao; GTC Total = đơn giao thành công / tổng đơn cần phát. Tổng đơn TikTok ở bảng shipper = đơn TikTok đã quét giao.']);
     notes.push(['Tỷ lệ quét giao = (tổng đơn − đơn nhập kho chưa quét) / tổng đơn. TB đơn/NV = tổng đơn / số shipper đi làm hôm nay.']);
     if (c) c.notes.forEach(t => notes.push([t]));
     notes.push([state.includePII ? 'Có kèm thông tin người nhận.' : 'Không kèm thông tin người nhận (SĐT, địa chỉ…).']);
@@ -2898,10 +3993,10 @@
    * ------------------------------------------------------------------ */
   function mount() {
     if ($('#b8s-launch')) return;
-    loadPrefs(); loadSites(); loadAi(); loadOffices(); loadDisc();
+    loadPrefs(); loadSites(); loadOffices(); loadKb().catch(() => {}); loadDisc();
     const css = `
 #b8s-launch.logo{left:12px;top:12px;right:auto;bottom:auto;width:150px;padding:0;background:#fff;border-radius:8px;overflow:hidden;line-height:0;box-shadow:0 3px 12px #0005;border:1px solid #d6dbe4}#b8s-launch.logo .b8sl-t{display:block;line-height:1;padding:6px 0 0;text-align:center;color:#022344;font:800 12.5px/1 system-ui,Segoe UI,Arial,sans-serif;letter-spacing:3px}#b8s-launch.logo img{display:block;width:150px;height:86px}#b8s-launch.logo.bad{outline:3px solid #ef4444;outline-offset:-3px}#b8s-launch.logo:hover{filter:brightness(.96)}
-#b8s-launch{position:fixed;right:20px;bottom:22px;z-index:999999;background:#4c3a8f;color:#fff;border:0;border-radius:10px;padding:12px 16px;font-weight:700;cursor:pointer;box-shadow:0 4px 18px #0005}
+#b8s-launch{position:fixed;left:50%;transform:translateX(-50%);right:auto;bottom:10px;z-index:999999;background:#4c3a8f;color:#fff;border:0;border-radius:10px;padding:12px 16px;font-weight:700;cursor:pointer;box-shadow:0 4px 18px #0005}
 #b8s-disc{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:30;width:min(920px,94%);max-height:60%;overflow:auto;box-shadow:0 8px 30px #0006;border-radius:10px;background:#fff}#b8s-disc .al{margin:0}#b8s-disc .b8sbtn.ghost{color:#374151;background:#f3f4f6;border:1px solid #d1d5db}
 #b8s-app.lk .lk-hide{display:none}
 #b8s-app{position:fixed;inset:2vh 2vw;z-index:1000000;display:none;flex-direction:column;border-radius:16px;overflow:hidden;box-shadow:0 20px 80px #0007;font:14px/1.45 "Segoe UI",Roboto,Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#1f2937}
@@ -2921,6 +4016,11 @@
 .b8s-sec{color:#fff;font-weight:700;text-align:center;margin:8px 0;font-size:15px}
 .b8s-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .b8s-card{background:#fffffff2;border-radius:12px;padding:10px 12px;text-align:center;box-shadow:0 2px 8px #0002}
+#b8s-anm .kpibar{background:#fffffff2;border-radius:10px;padding:8px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;box-shadow:0 2px 8px #0002;margin:0 0 8px}
+#b8s-anm .kpibar .kl{flex:1;min-width:300px}#b8s-anm .kpibar .kh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:12px;color:#64748b}
+#b8s-anm .kpibar .kt{color:#4b5563;font-weight:700}#b8s-anm .kpibar .kn{font-size:24px;line-height:1.1}
+#b8s-anm .kpibar .kr{display:flex;gap:26px;margin-left:auto;font-size:12px;color:#4b5563;text-align:right}#b8s-anm .kpibar .kr b{display:block;font-size:20px;color:#1f2937}
+#b8s-anm .mk.kpi{background:#15803d;top:-5px;bottom:-5px;box-shadow:0 0 0 1px #fff}
 .b8s-card span{display:block;font-size:12px;color:#4b5563}
 .b8s-card b{display:block;font-size:26px;margin-top:2px;line-height:1.2}
 .b8s-card small{display:block;font-size:11px;color:#6b7280;line-height:1.5}.b8s-card small i{font-style:normal;font-weight:700;color:#374151}
@@ -2932,7 +4032,28 @@
 .b8s-tw thead th{position:sticky;color:#fff;cursor:pointer;font-weight:600;line-height:18px;z-index:1}
 .b8s-tw thead tr:nth-child(1) th{top:0;height:34px;cursor:default}
 .b8s-tw thead tr:nth-child(2) th{top:34px}
-.g-nav{background:#1e3a8a}.g-gh{background:#3b82f6}.g-tt{background:#f59e0b}
+.g-nav{background:#1e3a8a}.g-gh{background:#3b82f6}.g-tt{background:#f59e0b}.g-sh{background:#4c3a8f}
+.b8s-tw thead th.g-sh{color:#fff;font-weight:700;text-align:center;vertical-align:middle}
+.sh-ld{display:inline-block;margin:0 0 0 6px;font:600 11px inherit;color:#4c3a8f;background:#fff;border:0;border-radius:99px;padding:2px 10px;cursor:pointer}
+.sh-ld:disabled{cursor:default;opacity:.85}
+.b8s-tw td small{display:block;font-size:10.5px;color:#6b7280;font-weight:400;line-height:1.2}
+.b8s-tw td.sh-na{color:#9ca3af;font-size:11px}
+/* Tổng quan gọn: mỗi dải chỉ số một hàng, bảng Shipper vừa đủ 15 dòng, từ ship 16 mới cuộn trong bảng */
+.b8s-top{padding:6px 16px 4px}.b8s-top h2{font-size:19px}
+.b8s-band{display:grid;grid-template-columns:96px repeat(7,minmax(0,1fr));gap:6px;margin-bottom:6px}
+.b8s-band .bl{display:flex;align-items:center;justify-content:center;text-align:center;color:#fff;font-weight:700;font-size:12.5px;line-height:1.2;background:#ffffff26;border-radius:10px;padding:0 6px}
+.b8s-band .b8s-card{padding:4px 6px 5px;border-radius:10px;min-width:0;box-shadow:0 1px 5px #0002}
+.b8s-band .b8s-card span{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.b8s-band .b8s-card b{font-size:21px;margin-top:0;line-height:1.15}
+.b8s-band .b8s-card small{font-size:10.5px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#b8s-dash .b8s-tw{margin-top:6px;max-height:540px}
+#b8s-dash .b8s-tw th,#b8s-dash .b8s-tw td{padding:0 8px;height:30px}
+#b8s-dash .b8s-tw thead tr:nth-child(1) th{height:28px;top:0}
+#b8s-dash .b8s-tw thead tr:nth-child(2) th{height:30px;top:28px}
+#b8s-dash .b8s-tw td small{display:inline;margin-left:5px;font-size:11px}
+#b8s-dash .b8s-notes{margin-top:6px}
+@media (max-width:900px){.b8s-band{grid-template-columns:repeat(2,minmax(0,1fr))}.b8s-band .bl{grid-column:1/-1;padding:4px}}
+
 .b8s-tw tbody tr:nth-child(even){background:#f9fafb}
 .b8s-tw tbody tr:hover{background:#eef2ff}
 .rk1,.rk2,.rk3{color:#d97706;font-weight:700}
@@ -2969,6 +4090,10 @@
 #b8s-app .b8s-pop .o{border:1px solid #cbd5e1;border-radius:12px;padding:3px 10px;font-size:12px;font-weight:600;cursor:pointer}#b8s-app .b8s-pop .o:hover{background:#ede9fe}#b8s-app .b8s-pop .o.on{background:#4c3a8f;color:#fff;border-color:#4c3a8f}
 #b8s-app .b8s-pop .hn{font-size:11px;color:#6b7280;border-top:1px solid #e5e7eb;padding-top:6px;margin-top:4px}
 #b8s-app .b8s-pop .ol{display:flex;align-items:center;gap:6px;padding:4px 2px;font-size:13px;cursor:pointer;color:#1f2937}
+#b8s-app .b5cam{display:inline-block;margin-left:5px;padding:0 7px;border-radius:99px;background:#4c3a8f;color:#fff;font-size:10.5px;font-weight:700;cursor:pointer;white-space:nowrap}#b8s-app .b5cam:hover{background:#6d5bd0}
+#b8s-bl{position:fixed;inset:0;z-index:60;background:#0008;display:flex;align-items:center;justify-content:center;padding:18px}#b8s-bl .blp{background:#fff;border-radius:12px;padding:14px;width:min(920px,100%);max-height:90vh;overflow:auto;box-shadow:0 10px 40px #0006;color:#1f2937}
+#b8s-app .blp .blr{display:flex;align-items:center;gap:10px;padding:6px 4px;border-top:1px solid #e5e7eb;flex-wrap:wrap}#b8s-app .blp .blo{min-width:150px}#b8s-app .blp .bln{flex:1;min-width:200px;font-size:13px}#b8s-app .blp .blb{display:flex;gap:6px;flex-wrap:wrap}#b8s-app .blp .blb .btn{font-size:12px;padding:3px 10px}
+#b8s-app .blp .blt{max-height:340px;overflow:auto;margin-top:8px;border:1px solid #e5e7eb;border-radius:8px}#b8s-app .blp .blt table{width:100%;border-collapse:collapse;font-size:12.5px}#b8s-app .blp .blt th{position:sticky;top:0;background:#4c3a8f;color:#fff;padding:5px 8px;text-align:left;white-space:nowrap}#b8s-app .blp .blt td{padding:4px 8px;border-top:1px solid #f1f5f9;white-space:nowrap}#b8s-app .blp .blt td.bla{white-space:normal;min-width:260px;max-width:420px}
 #b8s-app .lnk{cursor:pointer}#b8s-app .lnk:hover{text-decoration:underline}
 #b8s-app .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
 #b8s-app .anm-two{display:grid;grid-template-columns:1.05fr 1fr;gap:12px;margin-top:12px}
@@ -3004,6 +4129,63 @@
 #b8s-anm .anm-two{gap:8px;margin-top:8px}
 #b8s-anm .b8s-panel{padding:8px 10px;border-radius:10px}
 #b8s-anm .anm-two h3{font-size:13px;margin:0 0 4px}
+#b8s-pick .pk{display:flex;flex-direction:column;gap:8px;font-size:13px}
+#b8s-pick .pk-mu{color:#6b7280;font-size:11.5px}
+#b8s-pick .pk-ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;color:#fff}
+#b8s-pick .pk-ctl label{display:inline-flex;gap:6px;align-items:center;font-weight:600}
+#b8s-pick .pk-ctl input,#b8s-pick .pk-ctl select{font:600 13px inherit;border:0;border-radius:8px;padding:5px 9px;background:#fff;color:#4c3a8f}
+#b8s-pick .pk-chip{background:#fff;color:#4c3a8f;font-weight:600;border-radius:8px;padding:6px 12px}
+#b8s-pick .pk-chip small{font-weight:400;color:#6b7280}
+#b8s-pick .pk-go{border:0;background:#fff;color:#4c3a8f;font-weight:600;border-radius:8px;padding:7px 14px;cursor:pointer}
+#b8s-pick .pk-go:disabled{opacity:.6;cursor:default}
+#b8s-pick .pk-st{color:#fff;font-size:12px}
+#b8s-pick .pk-cards{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+#b8s-pick .pk-c{background:#fffffff2;border-radius:12px;padding:7px 10px 8px;text-align:center;box-shadow:0 2px 8px #0002;min-width:0}
+#b8s-pick .pk-c>span{display:block;font-size:12px;color:#4b5563}
+#b8s-pick .pk-c>b{display:block;font-size:26px;line-height:1.15;font-variant-numeric:tabular-nums;color:#2f55d4}
+#b8s-pick .pk-c small{display:block;font-size:11px;color:#6b7280;line-height:1.4}
+#b8s-pick .pk-c small .go{color:#4c3a8f}
+#b8s-pick .pk-d{display:flex;justify-content:center;gap:6px;font-size:11px;margin-top:1px;white-space:nowrap}
+#b8s-pick .pk-d em{font-style:normal;color:#6b7280}
+#b8s-pick .pk-c.click{cursor:pointer;outline:2px solid transparent;transition:outline-color .15s}
+#b8s-pick .pk-c.click:hover{outline-color:#fff}
+#b8s-pick .pk-up{color:#16a34a;font-weight:700}#b8s-pick .pk-dn{color:#dc2626;font-weight:700}#b8s-pick .pk-fl{color:#6b7280}
+#b8s-pick .pk-warn{color:#92400e;font-weight:700}
+#b8s-pick .pk-als{display:flex;flex-wrap:wrap;gap:8px}
+#b8s-pick .pk-al{border-radius:9px;padding:6px 12px;font-size:12.5px;flex:1 1 320px}
+#b8s-pick .pk-al.bad{background:#fee2e2;color:#b91c1c}#b8s-pick .pk-al.warn{background:#fef3c7;color:#92400e}#b8s-pick .pk-al.info{background:#f3f0ff;color:#4c3a8f}
+#b8s-pick .pk-box{background:#fffffff2;border-radius:12px;padding:9px 12px;box-shadow:0 2px 8px #0002;display:flex;flex-direction:column;gap:6px;min-width:0;color:#1f2937}
+#b8s-pick .pk-box>header{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;justify-content:space-between}
+#b8s-pick .pk-box h2{margin:0;font-size:14.5px;font-weight:700}
+#b8s-pick .pk-x{color:#4c3a8f;font-weight:600;text-decoration:none}
+#b8s-pick .pk-sc{overflow:auto;max-height:420px}
+#b8s-pick table{border-collapse:collapse;width:100%}
+#b8s-pick th,#b8s-pick td{padding:5px 7px;border-bottom:1px solid #e5e7eb;vertical-align:middle;white-space:nowrap;text-align:left}
+#b8s-pick th{position:sticky;top:0;z-index:1;font-size:11px;font-weight:600;color:#4b5563;background:#fafafa;white-space:normal;line-height:1.25;vertical-align:bottom}
+#b8s-pick .n{text-align:right;font-variant-numeric:tabular-nums}
+#b8s-pick td.nm{overflow:hidden;text-overflow:ellipsis;max-width:230px}
+#b8s-pick tr[data-a]{cursor:pointer}
+#b8s-pick tr[data-a]:hover td{background:#faf8ff}
+#b8s-pick tr.sel td{background:#f3f0ff!important}
+#b8s-pick tr.sel td:first-child{box-shadow:inset 3px 0 0 #4c3a8f}
+#b8s-pick .pk-stack{display:flex;height:9px;border-radius:5px;overflow:hidden;background:#e5e7eb;min-width:90px}
+#b8s-pick .pk-stack i{display:block;height:100%}
+#b8s-pick .pk-pill{display:inline-block;font-weight:700;font-size:11.5px;padding:1px 7px;border-radius:99px;font-variant-numeric:tabular-nums}
+#b8s-pick .pk-pill.good{background:#dcfce7;color:#15803d}#b8s-pick .pk-pill.warn{background:#fef3c7;color:#92400e}#b8s-pick .pk-pill.bad{background:#fee2e2;color:#b91c1c}#b8s-pick .pk-pill.na{background:#e5e7eb;color:#6b7280}
+#b8s-pick .pk-tag{display:inline-block;font-size:10.5px;font-weight:700;padding:0 6px;border-radius:99px;margin-left:5px;line-height:1.5;background:#f3f0ff;color:#4c3a8f}
+#b8s-pick .pk-tag.bd{background:#fef3c7;color:#92400e}
+#b8s-pick .pk-low{display:grid;grid-template-columns:minmax(0,42fr) minmax(0,58fr);gap:8px;align-items:stretch}
+#b8s-pick .pk-tiles{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+#b8s-pick .pk-tiles4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+#b8s-pick .pk-m{border:1px solid #e5e7eb;border-radius:9px;padding:6px 10px;display:flex;flex-direction:column;justify-content:center;min-width:0;background:#fff}
+#b8s-pick .pk-m.cur{background:#f3f0ff;border-color:#d9d0ff}
+#b8s-pick .pk-m .k{font-size:11px;color:#4b5563;font-weight:600}
+#b8s-pick .pk-m .v{font-size:21px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums}
+#b8s-pick .pk-m .s{font-size:11px;color:#6b7280}
+#b8s-pick .pk-leg{display:flex;gap:12px;font-size:11px;color:#6b7280}
+#b8s-pick .pk-leg span:before{content:"";display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:3px;background:var(--k)}
+#b8s-pick .pk-leg span.pk-mu:before{display:none}
+#b8s-pick .pk-foot{color:#fff;font-size:11.5px;opacity:.95}
 #b8s-anm .anm-hd{margin:8px 0 4px}
 #b8s-anm .al{padding:3px 8px;font-size:12.5px;margin-bottom:3px;line-height:1.35}
 #b8s-anm .al-box{max-height:none}
@@ -3066,7 +4248,6 @@
 #b8s-anm .rk2.hd{white-space:normal;line-height:1.2;align-items:end}
 #b8s-anm .qs{margin-left:4px;font-size:10px;font-weight:500;color:#64748b}
 #b8s-anm .fc b{font-size:14px;color:#111827}#b8s-anm .fc.base b{color:#6b7280;font-style:italic}#b8s-anm .fcs{margin-left:4px;font-size:10px;font-weight:500;color:#64748b}
-#b8s-anm .aibar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;padding:8px 10px 2px;margin-top:4px;border-top:1px solid #eef2f7;font-size:12px}
 #b8s-anm .sw{display:inline-block;width:38px;height:20px;border-radius:10px;background:#cbd5e1;position:relative;cursor:pointer;flex:none}
 #b8s-anm .sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
 #b8s-anm .sw.on{background:#4c3a8f}#b8s-anm .sw.on i{left:20px}#b8s-anm .sw.dis{opacity:.55}
@@ -3138,6 +4319,7 @@
 <div class="b8s-tabs">
   <button class="b8s-tab on" data-view="dash">Tổng quan</button>
   <button class="b8s-tab" data-view="anm">ANM</button>
+  <button class="b8s-tab" data-view="pick">Pickup-sale</button>
   <button class="b8s-tab" data-view="set">Cài đặt</button>
 </div>
 <div id="b8s-disc" style="display:none"></div>
@@ -3145,8 +4327,15 @@
   <section id="b8s-v-dash"><div id="b8s-dash"></div></section>
   <section id="b8s-v-hist" style="display:none"><div id="b8s-hist"></div></section>
   <section id="b8s-v-anm" style="display:none"><div id="b8s-anm"></div></section>
+  <section id="b8s-v-pick" style="display:none"><div id="b8s-pick"></div></section>
   <section id="b8s-v-set" style="display:none">
     <div class="b8s-setrow">
+    <div class="b8s-panel">
+      <h3>KPI POD2400</h3>
+      <p class="muted">Nhập KPI để tab ANM hiện thanh KPI POD2400 của khu vực (màu: đạt KPI là xanh, thấp hơn dưới ${KPI_GAP} điểm là vàng, từ ${KPI_GAP} điểm trở lên là đỏ). Để trống thì thanh KPI ẩn. Số nhập chỉ lưu trong trình duyệt của bạn.</p>
+      <div class="row"><label>Tên khu vực <input type="text" id="b8s-kpi-name" style="width:160px" placeholder="ví dụ: Hà Nội"></label> <label>KPI khu vực (%) <input type="number" id="b8s-kpi-reg" step="any" style="width:70px"></label></div>
+      <div class="row"><label>KPI từng bưu cục (mỗi dòng: tên bưu cục = KPI, tên đúng như trong danh sách Bưu cục)<br><textarea id="b8s-kpi-off" rows="5" style="width:360px" placeholder="FS ABC = 77&#10;DS XYZ = 75"></textarea></label></div>
+    </div>
     <div class="b8s-panel">
       <h3>TikTok Shop</h3>
       <div class="row"><label>Mã đầu vận đơn của TikTok Shop (cách nhau dấu phẩy)<br><input type="text" id="b8s-tt" style="width:260px"></label></div>
@@ -3184,14 +4373,11 @@
       <div class="muted">Bản này tắt sẵn và để tọa độ Hà Nội; hãy nhập tọa độ nơi bạn làm việc (các bưu cục gần nhau dùng chung một điểm) rồi tích bật. Chỉ gửi tọa độ ra ngoài, không gửi số liệu bưu cục.</div>
       <div id="b8s-wx-st" class="muted"></div>
     </div>
-    <div class="b8s-panel lk-hide">
-      <h3>🤖 AI dự báo POD cuối ngày</h3>
-      <div class="muted">Nhập khóa API của AI rồi bấm OK. Khóa đúng sẽ báo “Thành công”; khi đó công tắc “Dự báo POD bằng AI” dưới bảng xếp hạng (tab ANM) dùng được. Chỉ gửi các con số tổng hợp của bưu cục, không gửi mã đơn, tên ship hay thông tin người nhận. Mỗi lần phân tích tốn một lần gọi AI (tính phí trên tài khoản API của anh). Khóa được lưu trong trình duyệt này; chỉ dùng khóa riêng cho việc này, đặt hạn mức chi tiêu thấp.</div>
-      <div class="row"><input type="password" id="b8s-ai-key" autocomplete="off" spellcheck="false" style="width:320px" placeholder="Dán khóa API vào đây"><label style="display:flex;gap:6px;align-items:center">Mô hình <input type="text" id="b8s-ai-model" style="width:150px"></label><button class="b8sbtn solid" id="b8s-ai-ok">OK</button><button class="b8sbtn" id="b8s-ai-clear">Xóa khóa</button></div>
-      <div id="b8s-ai-st"></div>
-      <div style="margin-top:8px;font-weight:700">Hướng dẫn cho AI (có sẵn mặc định, sửa được)</div>
-      <textarea id="b8s-ai-prompt" rows="7" style="width:100%;box-sizing:border-box;font-size:12px"></textarea>
-      <div class="row"><button class="b8sbtn solid" id="b8s-ai-psave">Lưu hướng dẫn</button><button class="b8sbtn" id="b8s-ai-preset">Khôi phục mặc định</button><span id="b8s-ai-pst" class="muted"></span></div>
+    <div class="b8s-panel">
+      <h3>Dữ liệu so sánh (hôm qua và tuần trước)</h3>
+      <div class="muted">Tool tự lấy danh sách đơn của hôm qua và cùng thứ tuần trước từ trang Kanban để so với hôm nay đúng cùng giờ, và đối chiếu với số tổng của Kanban (lệch thì không dùng). Bản nén chỉ gồm giờ nhập kho, giờ ký nhận, cờ đơn mới và tên ship; không có mã vận đơn hay thông tin người nhận; tự xóa sau ${KB_KEEP} ngày.</div>
+      <div class="row"><button class="b8sbtn solid" id="b8s-kb">Lấy lại ngay</button></div>
+      <div id="b8s-kb-st" class="muted"></div>
     </div>
     <div class="b8s-panel">
       <h3>Sao lưu / khôi phục lịch sử</h3>
@@ -3233,17 +4419,8 @@
         ls.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-del]'); if (b && !b.disabled) officesRemove(b.dataset.del); });
         ls.addEventListener('change', e => { const i = e.target.closest && e.target.closest('input[data-cod]'); if (i) officesSaveCod(i.dataset.cod, i.value); }); }
       $('#b8s-wx-test').onclick = () => { if (!state.wx.on) { state.wx.on = true; on.checked = true; savePrefs(); } loadWeather(true); renderWxInfo(); };
-      { // AI
-        const mi = $('#b8s-ai-model'), ta = $('#b8s-ai-prompt'), pst = $('#b8s-ai-pst');
-        mi.value = state.ai.model; ta.value = state.ai.prompt || AI_PROMPT_DEFAULT;
-        $('#b8s-ai-ok').onclick = ((...a) => aiSubmitKey(...a));
-        $('#b8s-ai-key').addEventListener('keydown', e => { if (e.key === 'Enter') aiSubmitKey(); });
-        $('#b8s-ai-clear').onclick = ((...a) => aiClearKey(...a));
-        $('#b8s-ai-psave').onclick = () => { const v = ta.value.trim().slice(0, 4000); state.ai.prompt = v === AI_PROMPT_DEFAULT ? '' : v; saveAi(); pst.textContent = 'Đã lưu hướng dẫn.'; };
-        $('#b8s-ai-preset').onclick = () => { ta.value = AI_PROMPT_DEFAULT; state.ai.prompt = ''; saveAi(); pst.textContent = 'Đã khôi phục mặc định.'; };
-        renderAiInfo();
-      }
       $('#b8s-bk').onclick = backupHistory;
+      if ($('#b8s-kb')) $('#b8s-kb').onclick = () => { state.kb.tried = {}; kbEnsure(true); };
       $('#b8s-rs').onclick = () => $('#b8s-rs-file').click();
       $('#b8s-rs-file').onchange = e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) restoreHistory(f); };
       $('#b8s-gohist').onclick = () => { state.view = 'hist'; renderUI(); };
@@ -3274,10 +4451,13 @@
       const it = disc.pick[+c.dataset.dpick]; if (it) it.on = c.checked;
     });
     $('#b8s-switch').onclick = doSwitch;
-    app.querySelectorAll('.b8s-tab').forEach(t => t.addEventListener('click', () => { state.view = t.dataset.view; renderUI(); onEnterAnm(); }));
+    app.querySelectorAll('.b8s-tab').forEach(t => t.addEventListener('click', () => { state.view = t.dataset.view; renderUI(); onEnterAnm(); if (state.view === 'pick') onEnterPick(); }));
 
     $('#b8s-dash').addEventListener('click', e => {
       if (e.target.closest('[data-act="force-save"]')) { forceSave(); return; }
+      if (e.target.closest('button[data-shtog]')) { state.sh.hide = !state.sh.hide; renderDashboard(); return; }
+      const shb = e.target.closest('button[data-sh]');
+      if (shb) { shLoad(shb.dataset.sh).catch(er => { state.sh.msg = String(er && er.message || er); shRedraw(true); }); return; }
       const th = e.target.closest('th[data-k]');
       if (!th) return;
       const key = th.dataset.k;
@@ -3286,6 +4466,18 @@
     });
 
     $('#b8s-tt').value = state.tiktok;
+    const kpiFill = () => { $('#b8s-kpi-name').value = KPI_REGION_NAME; $('#b8s-kpi-reg').value = Number.isFinite(KPI_REGION) ? KPI_REGION : ''; $('#b8s-kpi-off').value = Object.entries(KPI_OFFICE).map(([k, v]) => `${k} = ${v}`).join('\n'); };
+    const kpiSave = () => {
+      const n = parseFloat(String($('#b8s-kpi-reg').value).replace(',', '.'));
+      KPI_REGION = Number.isFinite(n) ? n : NaN; KPI_REGION_NAME = $('#b8s-kpi-name').value.trim();
+      const o = {};
+      for (const l of $('#b8s-kpi-off').value.split('\n')) { const m = /^(.+?)\s*[=:\t]\s*([\d.,]+)\s*%?\s*$/.exec(l.trim()); if (m) { const v = parseFloat(m[2].replace(',', '.')); if (Number.isFinite(v)) o[m[1].trim()] = v; } }
+      KPI_OFFICE = o;
+      try { localStorage.setItem('b8s_kpi', JSON.stringify({ n: KPI_REGION_NAME, r: Number.isFinite(KPI_REGION) ? KPI_REGION : null, o: KPI_OFFICE })); } catch { /* bỏ qua */ }
+      kpiFill(); renderUI();
+    };
+    kpiFill();
+    for (const id of ['name', 'reg', 'off']) $('#b8s-kpi-' + id).addEventListener('change', kpiSave);
     const dmFill = () => { const r = dmRulesOf(state.dm); $('#b8s-dm-on').checked = r.on; $('#b8s-dm-depts').value = r.depts.join('\n'); $('#b8s-dm-cut').value = r.cutoff; $('#b8s-dm-min').value = r.minOk; };
     const dmSave = () => {
       state.dm = dmRulesOf({ on: $('#b8s-dm-on').checked, depts: $('#b8s-dm-depts').value.split('\n'), cutoff: $('#b8s-dm-cut').value, minOk: $('#b8s-dm-min').value });
@@ -3304,6 +4496,8 @@
     let rz = 0; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (state.view === 'anm') fitAnm(); }, 150); });
     $('#b8s-anm').addEventListener('click', ((...a) => onAnmClick(...a)));
     $('#b8s-anm').addEventListener('change', ((...a) => onAnmChange(...a)));
+    $('#b8s-pick').addEventListener('click', onPickClick);
+    $('#b8s-pick').addEventListener('change', onPickChange);
     $('#b8s-th').addEventListener('change', e => {
       const t = e.target, f = t.dataset && t.dataset.th;
       if (!f) return;
