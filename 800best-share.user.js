@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         800BEST - Thống kê tổng quan & Shipper (bản chia sẻ)
 // @namespace    local.800best.report.share
-// @version      3.32.0
+// @version      3.32.1
 // @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ.
 // @match        https://v9.800best.com/sea-web/*
 // @run-at       document-start
@@ -56,7 +56,7 @@
    *   enabled (bật/tắt), minVersion, pwVer (đổi số này = mọi người phải nhập lại), kdf (salt, iter), payloadVer, graceDays, msg.
    * Chỉ đọc 2 file công khai trên GitHub; KHÔNG gửi bất kỳ dữ liệu nào của người dùng đi đâu.
    * ------------------------------------------------------------------ */
-  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.32.0', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
+  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.32.1', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
   const lkS = { st: 'init', msg: '', busy: false, status: null, fails: 0, wait: 0, diag: '', checkedAt: 0 };   // st: init | checking | locked | blocked | error | open
   const lkNoop = () => undefined, lkResolved = () => Promise.resolve();
   const lkB64d = s => Uint8Array.from(atob(String(s)), c => c.charCodeAt(0));
@@ -2654,7 +2654,20 @@
       for (const r of state.hist.values()) { const o = canonOffice(r.office, OFFICES); if (!offHidden.has(o)) before.add(o); }
       const list = await discList();   // toàn bộ bưu cục tài khoản hiện đăng nhập được phép xem (ưu tiên lọc theo ownerSiteId nếu đã biết)
       const pk = discPick(list, new Set(), new Set());   // known/hidden để trống: lấy hết bưu cục hợp lệ, không phân biệt mới/cũ
-      const names = pk.cand.map(c => c.name).sort((a, b) => a.localeCompare(b, 'vi'));
+      // Chỉ tính là "đang quản lý" khi hôm nay có đơn — loại bưu cục rỗng (0 đơn), tránh lấy nhầm bưu cục không hoạt động
+      const todayK = dateKey(new Date()), batch = pk.cand.slice(0, DISC_MAX_PROBE);
+      const okC = [], emptyC = [];
+      let pi = 0;
+      const probeWorker = async () => {
+        while (pi < batch.length) {
+          const c = batch[pi++];
+          try { const n = await discProbe(c); if (n > 0) okC.push(c); else emptyC.push(c.name); }
+          catch { /* lỗi kiểm tra: bỏ qua, không tính vào danh sách */ }
+        }
+      };
+      await Promise.all([probeWorker(), probeWorker(), probeWorker()]);
+      const skippedLeft = pk.cand.length - batch.length;
+      const names = okC.map(c => c.name).sort((a, b) => a.localeCompare(b, 'vi'));
       const nameSet = new Set(names);
       OFFICES.splice(0, OFFICES.length, ...names);
       // Thay thế hoàn toàn: bưu cục nào trước đó có hiện ra (kể cả chỉ do còn bản lưu cũ trong lịch sử) mà giờ không còn
@@ -2662,13 +2675,16 @@
       for (const n of before) if (!nameSet.has(n)) offHidden.add(n);
       for (const n of names) { offHidden.delete(n); offHidden.delete(plain(n)); }
       for (const k of Object.keys(state.sites)) delete state.sites[k];
-      for (const c of pk.cand) state.sites[plain(c.name)] = { id: c.id, code: String(c.code) };
+      for (const c of okC) state.sites[plain(c.name)] = { id: c.id, code: String(c.code) };
       state.anm.sel = null;   // chọn lại tất cả theo danh sách mới
       saveOffices(); saveSites(); savePrefs();
       const b = $('#b8s-of-list'); if (b) delete b.dataset.sig;
       state.ofList.at = Date.now();
-      state.ofList.note = names.length ? `Đã tải ${names.length} bưu cục đang quản lý.` : 'Tài khoản này hiện không quản lý bưu cục nào (theo hệ thống trả về).';
-      state.ofList.warn = !names.length;
+      const extra = [];
+      if (emptyC.length) extra.push(`bỏ qua ${emptyC.length} bưu cục rỗng hôm nay (${emptyC.join(', ')})`);
+      if (skippedLeft > 0) extra.push(`còn ${skippedLeft} bưu cục chưa kiểm tra kịp, bấm tải lại để kiểm tra tiếp`);
+      state.ofList.note = (names.length ? `Đã tải ${names.length} bưu cục đang quản lý (có đơn hôm nay)` : 'Không có bưu cục nào có đơn hôm nay') + (extra.length ? `; ${extra.join('; ')}` : '') + '.';
+      state.ofList.warn = !names.length || !!emptyC.length || skippedLeft > 0;
       log(state.ofList.note, !names.length);
     } catch (e) {
       state.ofList.note = `Không tải được danh sách bưu cục (${e && e.message || e}). Danh sách cũ vẫn giữ nguyên.`;
