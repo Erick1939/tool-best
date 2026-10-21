@@ -2493,7 +2493,7 @@
 
   // ----- Tự dò bưu cục: chạy khi bấm “Tải số liệu” (ANM) hoặc “Chuyển bưu cục” (Tổng quan) -----
   const DISC_MAX_NEW = 12, DISC_MAX_PROBE = 80;
-  const disc = { on: true, busy: false, undo: null, pick: null, note: '', warn: false, empty: {} };   // empty: bưu cục 0 đơn đã kiểm tra trong ngày (không dò lại)
+  const disc = { on: true, busy: false, undo: null, pick: null, note: '', warn: false, empty: {}, unknownOwner: false };   // empty: bưu cục 0 đơn đã kiểm tra trong ngày (không dò lại)
   function loadDisc() {
     try { const o = JSON.parse(localStorage.getItem('b8s_disc') || '{}') || {}; if (typeof o.on === 'boolean') disc.on = o.on; } catch { /* bỏ qua */ }
     try { const n = Number(localStorage.getItem('b8s_owner')); if (Number.isFinite(n) && n > 0) state.ownerSiteId = n; } catch { /* bỏ qua */ }
@@ -2529,7 +2529,8 @@
     const box = $('#b8s-disc'); if (!box) return;
     let h = '';
     if (disc.pick) {
-      h = `<div class="al a"><b>Tìm thấy ${disc.pick.length} bưu cục có đơn.</b> Nhiều hơn ${DISC_MAX_NEW} nên tool không tự thêm. Tích những bưu cục bạn muốn theo dõi:<div style="max-height:150px;overflow:auto;margin:4px 0">${disc.pick.map((c, i) => `<label style="display:inline-block;min-width:230px"><input type="checkbox" data-dpick="${i}" ${c.on === false ? '' : 'checked'}> ${esc(c.name)} <span class="muted">(${c.n} đơn)</span></label>`).join('')}</div><button class="b8sbtn solid" data-d="padd">Thêm các bưu cục đã tích</button> <button class="b8sbtn" data-d="pall">Tích hết</button> <button class="b8sbtn" data-d="pnone">Bỏ tích hết</button> <button class="b8sbtn" data-d="pskip">Bỏ qua</button></div>`;
+      const warnOwner = disc.unknownOwner ? `<div style="margin-bottom:6px"><b>⚠️ Chưa xác định được chính xác bưu cục bạn quản lý.</b> Danh sách dưới đây là mọi bưu cục có đơn hôm nay mà tài khoản đang đăng nhập được phép xem, có thể gồm bưu cục KHÔNG phải của bạn. Hãy vào ô “Bưu cục” trên trang web, gõ/chọn 1 bưu cục của bạn một lần, rồi quay lại bấm “Tải số liệu” để tool tự nhận đúng — hoặc tự tích đúng bưu cục của bạn bên dưới, đừng bấm “Tích hết” nếu không chắc.</div>` : '';
+      h = `<div class="al a">${warnOwner}<b>Tìm thấy ${disc.pick.length} bưu cục có đơn.</b> ${disc.unknownOwner ? 'Tool chưa rõ bưu cục của bạn nên hiện hết ra đây.' : `Nhiều hơn ${DISC_MAX_NEW} nên tool không tự thêm.`} Tích những bưu cục bạn muốn theo dõi:<div style="max-height:150px;overflow:auto;margin:4px 0">${disc.pick.map((c, i) => `<label style="display:inline-block;min-width:230px"><input type="checkbox" data-dpick="${i}" ${c.on === false ? '' : 'checked'}> ${esc(c.name)} <span class="muted">(${c.n} đơn)</span></label>`).join('')}</div><button class="b8sbtn solid" data-d="padd">Thêm các bưu cục đã tích</button> <button class="b8sbtn" data-d="pall">Tích hết</button> <button class="b8sbtn" data-d="pnone">Bỏ tích hết</button> <button class="b8sbtn" data-d="pskip">Bỏ qua</button></div>`;
     } else if (disc.note) {
       h = `<div class="al ${disc.warn ? 'a' : 'ok'}" style="display:flex;gap:8px;align-items:center"><span style="flex:1">${esc(disc.note)}</span>${disc.undo && disc.undo.length ? '<button class="b8sbtn" data-d="undo" title="Bỏ các bưu cục vừa được tự thêm">Hoàn tác</button>' : ''}<button class="b8sbtn ghost" data-d="close">×</button></div>`;
     }
@@ -2593,9 +2594,13 @@
       };
       await Promise.all([worker(), worker(), worker()]);
       ok.sort((a, b) => a.name.localeCompare(b.name, 'vi'));
+      const unknownOwner = !OFFICES.length && !Number.isFinite(state.ownerSiteId);   // lần đầu cài, chưa rõ bưu cục của tài khoản: luôn hỏi lại, không tự thêm
       let added = [];
-      if (ok.length > DISC_MAX_NEW) { disc.pick = ok; disc.note = ''; disc.undo = null; }
-      else { added = discAdd(ok); disc.undo = added.length ? added : null; }
+      if (ok.length > DISC_MAX_NEW || unknownOwner) {
+        disc.pick = unknownOwner ? ok.map(c => Object.assign({}, c, { on: false })) : ok;
+        disc.note = ''; disc.undo = null; disc.unknownOwner = unknownOwner;
+      }
+      else { disc.unknownOwner = false; added = discAdd(ok); disc.undo = added.length ? added : null; }
       const quiet = !added.length && !empty.length && !failed.length && !left && !disc.pick && OFFICES.length;
       const sum = discSummary(pk, added, empty, failed, left);
       if (!disc.pick) {
