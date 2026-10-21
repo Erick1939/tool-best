@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         800BEST - Thống kê tổng quan & Shipper (bản chia sẻ)
 // @namespace    local.800best.report.share
-// @version      3.31.1
+// @version      3.32.0
 // @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ.
 // @match        https://v9.800best.com/sea-web/*
 // @run-at       document-start
@@ -45,7 +45,8 @@
     th: {},                    // ngưỡng màu/cảnh báo do người dùng chỉnh (ghi đè mặc định)
     dm: null,                  // quy tắc tính ship đi làm (nạp từ cấu hình, mặc định DM_RULES_DEFAULT)
     calc: null, calcKey: '',
-    endpoints: new Map()       // chỉ lưu tên khóa API để chẩn đoán, KHÔNG lưu giá trị
+    endpoints: new Map(),      // chỉ lưu tên khóa API để chẩn đoán, KHÔNG lưu giá trị
+    ofList: { busy: false, at: 0, note: '', warn: false }   // kết quả nút "Tải danh sách bưu cục" ở tab Tổng quan
   };
 
 
@@ -55,7 +56,7 @@
    *   enabled (bật/tắt), minVersion, pwVer (đổi số này = mọi người phải nhập lại), kdf (salt, iter), payloadVer, graceDays, msg.
    * Chỉ đọc 2 file công khai trên GitHub; KHÔNG gửi bất kỳ dữ liệu nào của người dùng đi đâu.
    * ------------------------------------------------------------------ */
-  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.31.1', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
+  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.32.0', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
   const lkS = { st: 'init', msg: '', busy: false, status: null, fails: 0, wait: 0, diag: '', checkedAt: 0 };   // st: init | checking | locked | blocked | error | open
   const lkNoop = () => undefined, lkResolved = () => Promise.resolve();
   const lkB64d = s => Uint8Array.from(atob(String(s)), c => c.charCodeAt(0));
@@ -1480,7 +1481,7 @@
   const discName = x => { const v = x && x.nameLocale; const t = typeof v === 'string' ? v : (v && typeof v === 'object' ? (Object.values(v).find(q => typeof q === 'string') || '') : (x && x.name) || ''); return String(t || '').trim().replace(/\s+/g, ' '); };
   // list: danh sách bưu cục hệ thống trả về; known: Set tên (đã bỏ dấu) đã có; hidden: Set tên người dùng đã xóa
   function discPick(list, known, hidden) {
-    const out = { cand: [], closed: 0, skipType: [], removed: [], have: [], bad: 0, dup: 0, total: 0 };
+    const out = { cand: [], closed: 0, skipType: [], removed: [], have: [], bad: 0, dup: 0, total: 0, allNames: new Set() };
     const seen = new Set(), seenName = new Set();
     for (const x of Array.isArray(list) ? list : []) {
       if (!x || typeof x !== 'object') { out.bad++; continue; }
@@ -1490,6 +1491,7 @@
       const key = String(id);
       if (seen.has(key)) { out.dup++; continue; }
       seen.add(key);
+      out.allNames.add(plainOf(name));   // mọi bưu cục tài khoản này thấy được hôm nay, kể cả đang đóng cửa — dùng để phát hiện bưu cục không còn thuộc tài khoản
       if (x.status !== 'ENABLE') { out.closed++; continue; }
       if (seenName.has(name)) { out.dup++; continue; }   // tên là duy nhất; trùng tên thì chỉ lấy bưu cục đầu tiên đang mở
       seenName.add(name);
@@ -1505,8 +1507,9 @@
   function discOwnerOf(body) {
     try { const o = typeof body === 'string' ? JSON.parse(body) : body; const v = o && o.ownerSiteId; const n = typeof v === 'string' && v.trim() ? Number(v) : v; return Number.isFinite(n) && n > 0 ? n : null; } catch { return null; }
   }
-  function discSummary(pk, added, empty, failed, left) {
+  function discSummary(pk, added, empty, failed, left, staleRemoved) {
     const parts = [];
+    if (staleRemoved && staleRemoved.length) parts.push(`⚠️ loại ${staleRemoved.length} bưu cục không còn thuộc tài khoản đang đăng nhập (${staleRemoved.join(', ')})`);
     parts.push(added.length ? `thêm ${added.length} bưu cục (${added.join(', ')})` : 'không có bưu cục mới');
     if (empty.length) parts.push(`bỏ qua ${empty.length} bưu cục rỗng (${empty.join(', ')})`);
     if (pk.closed) parts.push(`${pk.closed} đã đóng`);
@@ -2597,6 +2600,13 @@
         disc.note = m; disc.warn = true; disc.undo = null; log(m, true); discRender(); return null;
       }
       const pk = discPick(list, new Set(OFFICES.map(plainOf)), offHidden);
+      // Bưu cục đang lưu nhưng tài khoản hiện đăng nhập không còn thấy trong danh sách được phép xem hôm nay: không còn thuộc tài khoản này, tự loại khỏi danh sách theo dõi
+      const staleRemoved = OFFICES.filter(o => !pk.allNames.has(plainOf(o)));
+      if (staleRemoved.length) {
+        for (const n of staleRemoved) { const i = OFFICES.indexOf(n); if (i >= 0) OFFICES.splice(i, 1); delete state.sites[plain(n)]; }
+        saveOffices(); saveSites();
+        const b = $('#b8s-of-list'); if (b) delete b.dataset.sig;
+      }
       const today = dateKey(new Date());
       const todo = pk.cand.filter(c => disc.empty[c.id] !== today);
       const left = Math.max(0, todo.length - DISC_MAX_PROBE), batch = todo.slice(0, DISC_MAX_PROBE);
@@ -2618,19 +2628,56 @@
         disc.note = ''; disc.undo = null; disc.unknownOwner = unknownOwner;
       }
       else { disc.unknownOwner = false; added = discAdd(ok); disc.undo = added.length ? added : null; }
-      const quiet = !added.length && !empty.length && !failed.length && !left && !disc.pick && OFFICES.length;
-      const sum = discSummary(pk, added, empty, failed, left);
+      const quiet = !added.length && !empty.length && !failed.length && !left && !disc.pick && !staleRemoved.length && OFFICES.length;
+      const sum = discSummary(pk, added, empty, failed, left, staleRemoved);
       if (!disc.pick) {
         disc.note = quiet ? '' : (!OFFICES.length ? `${sum} Chưa có bưu cục nào có đơn hôm nay.` : sum);
-        disc.warn = !added.length;
+        disc.warn = !added.length || !!staleRemoved.length;
       }
-      if (!quiet) log(sum, !!failed.length);
+      if (!quiet) log(sum, !!failed.length || !!staleRemoved.length);
       discRender();
-      if (added.length && state.view === 'anm') renderAnm();
-      return { added, empty, failed, picked: !!disc.pick };
+      if (added.length || staleRemoved.length) { renderOffices(); renderOfficeList(); if (state.view === 'anm') renderAnm(); }
+      return { added, empty, failed, staleRemoved, picked: !!disc.pick };
     } catch (e) {
       log(`Dò bưu cục lỗi: ${e && e.message || e}`, true); return null;
     } finally { disc.busy = false; }
+  }
+  // Nút "Tải danh sách bưu cục" (tab Tổng quan): hỏi thẳng hệ thống xem tài khoản đang đăng nhập quản lý đúng những bưu cục nào,
+  // rồi THAY THẾ HOÀN TOÀN danh sách đang theo dõi bằng danh sách đó (không gộp/giữ bưu cục cũ). Danh sách này dùng chung cho cả tab ANM.
+  async function refreshOfficeList() {
+    if (state.busy || disc.busy || state.ofList.busy) return;
+    state.ofList.busy = true; renderDashboard();
+    try {
+      // bưu cục đang hiện ra (kể cả bưu cục chỉ còn trong lịch sử cũ, không nằm trong OFFICES) — để biết cái nào cần ẩn đi.
+      // Tự tính thay vì gọi anmOffices() vì anmOffices() thuộc phần tab ANM có thể đang bị khóa (bản chia sẻ) chưa nhập mật khẩu.
+      const before = new Set(OFFICES);
+      for (const r of state.hist.values()) { const o = canonOffice(r.office, OFFICES); if (!offHidden.has(o)) before.add(o); }
+      const list = await discList();   // toàn bộ bưu cục tài khoản hiện đăng nhập được phép xem (ưu tiên lọc theo ownerSiteId nếu đã biết)
+      const pk = discPick(list, new Set(), new Set());   // known/hidden để trống: lấy hết bưu cục hợp lệ, không phân biệt mới/cũ
+      const names = pk.cand.map(c => c.name).sort((a, b) => a.localeCompare(b, 'vi'));
+      const nameSet = new Set(names);
+      OFFICES.splice(0, OFFICES.length, ...names);
+      // Thay thế hoàn toàn: bưu cục nào trước đó có hiện ra (kể cả chỉ do còn bản lưu cũ trong lịch sử) mà giờ không còn
+      // trong danh sách mới thì ẩn hẳn đi, để không bị lịch sử cũ kéo lại hiện ra lần nữa.
+      for (const n of before) if (!nameSet.has(n)) offHidden.add(n);
+      for (const n of names) { offHidden.delete(n); offHidden.delete(plain(n)); }
+      for (const k of Object.keys(state.sites)) delete state.sites[k];
+      for (const c of pk.cand) state.sites[plain(c.name)] = { id: c.id, code: String(c.code) };
+      state.anm.sel = null;   // chọn lại tất cả theo danh sách mới
+      saveOffices(); saveSites(); savePrefs();
+      const b = $('#b8s-of-list'); if (b) delete b.dataset.sig;
+      state.ofList.at = Date.now();
+      state.ofList.note = names.length ? `Đã tải ${names.length} bưu cục đang quản lý.` : 'Tài khoản này hiện không quản lý bưu cục nào (theo hệ thống trả về).';
+      state.ofList.warn = !names.length;
+      log(state.ofList.note, !names.length);
+    } catch (e) {
+      state.ofList.note = `Không tải được danh sách bưu cục (${e && e.message || e}). Danh sách cũ vẫn giữ nguyên.`;
+      state.ofList.warn = true;
+      log(state.ofList.note, true);
+    } finally {
+      state.ofList.busy = false;
+      renderOffices(); renderOfficeList(); renderDashboard(); if (state.view === 'anm') renderAnm();
+    }
   }
   async function resolveSite(name) {
     const key = plain(name);
@@ -3781,21 +3828,29 @@
     if (i) i.onchange = () => { const v = i.value, t = dateKey(new Date()); state.dashDay = v && v < t ? v : ''; renderDashboard(); };
     if (b) b.onclick = () => { state.dashDay = ''; renderDashboard(); };
   }
+  function officeListPanelHtml() {
+    const L = state.ofList;
+    const btn = `<span class="btn" data-act="officeList">${L.busy ? '⟳ Đang tải danh sách bưu cục…' : '🔍 Tải danh sách bưu cục'}</span>`;
+    const listTxt = OFFICES.length ? `<div class="muted" style="margin-top:4px">Đang quản lý <b>${OFFICES.length}</b> bưu cục: ${esc(OFFICES.join(', '))}</div>` : '<div class="muted" style="margin-top:4px">Chưa có bưu cục nào — bấm nút trên để tool hỏi hệ thống xem tài khoản đang đăng nhập quản lý bưu cục nào.</div>';
+    const note = L.note ? `<div class="al ${L.warn ? 'a' : 'ok'}" style="margin-top:4px">${esc(L.note)}</div>` : '';
+    return `<div class="b8s-panel" style="padding:10px 14px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>Bưu cục đang quản lý</b>${btn}<span class="muted">Danh sách này dùng chung cho cả tab ANM. Bấm lại để thay mới hoàn toàn theo tài khoản V9 đang đăng nhập.</span></div>${listTxt}${note}</div>`;
+  }
   function renderDashboard() {
     const box = $('#b8s-dash');
     if (!box) return;
+    const ofPanel = officeListPanelHtml();
     const today0 = dateKey(new Date());
     if (state.dashDay && state.dashDay >= today0) state.dashDay = '';
     const past = !!state.dashDay;
     let c = null;
     if (past) {
       const rec = state.office ? state.hist.get(`${state.office}|${state.dashDay}`) || [...state.hist.values()].find(r => r.date === state.dashDay && sameOffice(r.office, state.office)) : null;
-      if (!rec) { box.innerHTML = dashDayBar(today0, true) + `<div class="b8s-empty"><b>Không có bản lưu ngày ${esc(fmtDM(state.dashDay))}${state.office ? ' của ' + esc(state.office) : ''}</b><br>${state.office ? 'Chọn ngày khác hoặc “Về hôm nay”.' : 'Chọn bưu cục ở thanh phía trên (bấm “Chuyển bưu cục”) để xem ngày cũ của bưu cục đó.'}</div>`; bindDashDay(box); return; }
+      if (!rec) { box.innerHTML = ofPanel + dashDayBar(today0, true) + `<div class="b8s-empty"><b>Không có bản lưu ngày ${esc(fmtDM(state.dashDay))}${state.office ? ' của ' + esc(state.office) : ''}</b><br>${state.office ? 'Chọn ngày khác hoặc “Về hôm nay”.' : 'Chọn bưu cục ở thanh phía trên (bấm “Chuyển bưu cục”) để xem ngày cũ của bưu cục đó.'}</div>`; bindDashDay(box); return; }
       c = recToCalc(rec);
     } else c = getCalc();
     const dayBar = dashDayBar(today0, past);
     if (!c) {
-      box.innerHTML = dayBar + '<div class="b8s-empty"><b>Chưa có dữ liệu</b><br>Chọn bưu cục ở thanh phía trên rồi bấm “Chuyển bưu cục”. Script sẽ tự đọc toàn bộ số liệu (tab Tiến độ nhân viên, Chi tiết phát kiện) rồi quay về tab bạn đang xem.</div>';
+      box.innerHTML = ofPanel + dayBar + '<div class="b8s-empty"><b>Chưa có dữ liệu</b><br>Chọn bưu cục ở thanh phía trên rồi bấm “Chuyển bưu cục”. Script sẽ tự đọc toàn bộ số liệu (tab Tiến độ nhân viên, Chi tiết phát kiện) rồi quay về tab bạn đang xem.</div>';
       bindDashDay(box); return;
     }
     const cl = cardList(c);
@@ -3845,7 +3900,7 @@
     }
 
     const warn = (!past && state.pending) ? `<div class="b8s-warn">⚠ Chưa lưu lịch sử: ${esc(state.pending.reason)} <button class="b8sbtn solid" data-act="force-save">Vẫn lưu</button></div>` : '';
-    box.innerHTML = `${dayBar}${warn}
+    box.innerHTML = `${ofPanel}${dayBar}${warn}
       <div class="b8s-band"><div class="bl">📦 Giao thường</div>${cl.main.map(card).join('')}</div>
       ${c.hasTT ? `<div class="b8s-band"><div class="bl">🎵 TikTok Shop</div>${cl.tts.map(card).join('')}</div>` : ''}
       <div class="b8s-tw"><table><thead>${head1}${head2}</thead><tbody>${body}${total}</tbody></table></div>
@@ -4452,12 +4507,9 @@
     { const fa = $('#b8s-fast'); if (fa) { fa.checked = !!state.fast; fa.onchange = () => { state.fast = fa.checked; savePrefs(); }; } }
     const doSwitch = async () => {
       if (state.busy || disc.busy) return;
-      const chosen = $('#b8s-office-in').value;   // giữ lựa chọn của người dùng dù ô chọn có được vẽ lại
-      await discoverOffices();   // tự dò bưu cục mới (chỉ gọi nhỏ nếu không có gì mới)
-      if (disc.pick) return;
-      const sel = $('#b8s-office-in'); if (chosen && sel && OFFICES.includes(chosen)) sel.value = chosen;
-      const n = chosen && OFFICES.includes(chosen) ? chosen : $('#b8s-office-in').value;
-      if (n) switchOffice(n); else log(OFFICES.length ? 'Hãy chọn một bưu cục.' : 'Chưa có bưu cục nào có đơn hôm nay để chọn.', !!OFFICES.length);
+      // Không còn tự dò bưu cục ở đây nữa: chỉ chuyển sang đúng bưu cục đã có sẵn trong danh sách (tải ở tab Tổng quan → "Tải danh sách bưu cục").
+      const n = $('#b8s-office-in').value;
+      if (n) switchOffice(n); else log(OFFICES.length ? 'Hãy chọn một bưu cục.' : 'Chưa có bưu cục nào được theo dõi. Bấm “Tải danh sách bưu cục” ở trên.', !!OFFICES.length);
     };
     $('#b8s-disc').addEventListener('click', e => {
       const b = e.target.closest('[data-d]'); if (!b) return;
@@ -4476,6 +4528,7 @@
     app.querySelectorAll('.b8s-tab').forEach(t => t.addEventListener('click', () => { state.view = t.dataset.view; renderUI(); onEnterAnm(); if (state.view === 'pick') onEnterPick(); }));
 
     $('#b8s-dash').addEventListener('click', e => {
+      if (e.target.closest('[data-act="officeList"]')) { refreshOfficeList(); return; }
       if (e.target.closest('[data-act="force-save"]')) { forceSave(); return; }
       if (e.target.closest('button[data-shtog]')) { state.sh.hide = !state.sh.hide; renderDashboard(); return; }
       const shb = e.target.closest('button[data-sh]');
