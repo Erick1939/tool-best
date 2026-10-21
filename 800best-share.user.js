@@ -1579,10 +1579,27 @@
     } catch { /* bỏ qua */ }
   }
 
+  // Xóa bưu cục/cache đã lưu trên trình duyệt này khi phát hiện đang dùng tài khoản khác chủ bưu cục khác với lần trước
+  // (tránh 1 trình duyệt từng mở tài khoản A rồi mở tài khoản B vẫn còn hiện bưu cục của A)
+  function resetOwnerScopedData(reason) {
+    OFFICES.splice(0, OFFICES.length); offHidden.clear(); Object.keys(state.sites).forEach(k => delete state.sites[k]);
+    try { localStorage.removeItem('b8s_offices'); localStorage.removeItem('b8s_offhide'); localStorage.removeItem('b8s_sites'); localStorage.removeItem('b8s_codsites'); } catch { /* bỏ qua */ }
+    disc.empty = {}; disc.pick = null; disc.undo = null;
+    disc.note = reason; disc.warn = true;
+    try { const b = $('#b8s-of-list'); if (b) delete b.dataset.sig; } catch { /* bỏ qua */ }
+    try { renderOffices(); renderOfficeList(); discRender(); if (state.view === 'anm') renderAnm(); } catch { /* bỏ qua, có thể gọi trước khi giao diện dựng xong */ }
+    log(reason, true);
+  }
   // Trang tự gửi lệnh danh sách bưu cục kèm ownerSiteId của chính tài khoản đang dùng: ghi lại để tự dò bưu cục
   function captureOwner(body) {
     const n = discOwnerOf(body);
-    if (n && n !== state.ownerSiteId) { state.ownerSiteId = n; try { localStorage.setItem('b8s_owner', String(n)); } catch { /* bỏ qua */ } }
+    if (!n || n === state.ownerSiteId) return;
+    const prev = state.ownerSiteId;
+    state.ownerSiteId = n;
+    try { localStorage.setItem('b8s_owner', String(n)); } catch { /* bỏ qua */ }
+    if (Number.isFinite(prev) && prev > 0 && OFFICES.length) {
+      resetOwnerScopedData('Phát hiện trình duyệt này vừa đổi sang tài khoản khác: đã xóa bưu cục/dữ liệu cũ. Bấm “Tải số liệu” (ANM) hoặc “Chuyển bưu cục” (Tổng quan) để tool tự tìm đúng bưu cục của tài khoản đang đăng nhập.');
+    }
   }
   function hookNetwork() {
     const nativeFetch = window.fetch;
