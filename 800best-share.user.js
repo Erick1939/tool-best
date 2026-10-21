@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         800BEST - Thống kê tổng quan & Shipper (bản chia sẻ)
 // @namespace    local.800best.report.share
-// @version      3.32.2
+// @version      3.34.0
 // @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ.
 // @match        https://v9.800best.com/sea-web/*
 // @run-at       document-start
@@ -56,7 +56,7 @@
    *   enabled (bật/tắt), minVersion, pwVer (đổi số này = mọi người phải nhập lại), kdf (salt, iter), payloadVer, graceDays, msg.
    * Chỉ đọc 2 file công khai trên GitHub; KHÔNG gửi bất kỳ dữ liệu nào của người dùng đi đâu.
    * ------------------------------------------------------------------ */
-  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.32.2', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
+  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.34.0', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
   const lkS = { st: 'init', msg: '', busy: false, status: null, fails: 0, wait: 0, diag: '', checkedAt: 0 };   // st: init | checking | locked | blocked | error | open
   const lkNoop = () => undefined, lkResolved = () => Promise.resolve();
   const lkB64d = s => Uint8Array.from(atob(String(s)), c => c.charCodeAt(0));
@@ -717,7 +717,8 @@
       }
       ships.push({ n, sc: 0, ok: h.ok, tt: h.tt, tk: 0, sg: h.ok, ft: h.ft });
     });
-    return { office, date, id: `${office}|${date}`, savedAt: '', v: 1, verified: true, all, tt, backlog: null, odrTT: null, odr2: null, firstOk: first, nWork: ships.length, nScan: null, workersEstimated: true, ships, rb: 'kb', rbAt: '', fin: E.fin || null };
+    const odr2 = (E.fin && Number.isFinite(E.fin.odrDen) && E.fin.odrDen > 0) ? { due: E.fin.odrDen, ok: E.fin.odrOk || 0 } : null;
+    return { office, date, id: `${office}|${date}`, savedAt: '', v: 1, verified: true, all, tt, backlog: null, odrTT: null, odr2, firstOk: first, nWork: ships.length, nScan: null, workersEstimated: true, ships, rb: 'kb', rbAt: '', fin: E.fin || null };
   }
 
   // Thẻ chỉ số: [nhãn, giá trị, kiểu, màu]; thẻ không có dữ liệu bị bỏ khi hiển thị
@@ -2229,7 +2230,29 @@
   const snapStore = (() => { try { return makeSnapStore(indexedDB); } catch { return null; } })();
   const TAB_ID = Math.random().toString(36).slice(2);
   const API_KB_DET = '/v9-order/dc/kanban/am/vn/site-kpi-kanban/get-sdisp-detail', API_KB_SUM = '/v9-order/dc/kanban/am/vn/site-kpi-kanban/get-sdisp', API_KB_SREC = '/v9-order/dc/kanban/am/get-srec-sdisp';
+  const API_KB_SFT = '/v9-order/dc/kanban/am/vn/site-kpi-kanban/get-sdisp-shift-summary';   // v3.33: Tỷ lệ ODR thật (ký nhận đơn tới hạn ODR), cộng Trip 1 + Trip 2
   const KB_KEEP = 9, KB_RETRY_MS = 300000, KB_CMP_DAYS = [1, 7];
+  // Dò toàn bộ cây JSON trả về, cộng totalCnt/finishedCnt của mọi mục có indicatorName chứa "ODR" (gồm cả Trip 1 + Trip 2 + ca khác nếu có)
+  function sumOdrShift(d) {
+    let due = 0, ok = 0, found = false;
+    const walk = x => {
+      if (!x || typeof x !== 'object') return;
+      if (Array.isArray(x)) { x.forEach(walk); return; }
+      if (/ODR/i.test(String(x.indicatorName || ''))) {
+        const t = Number(x.totalCnt), f = Number(x.finishedCnt);
+        if (Number.isFinite(t) && Number.isFinite(f)) { due += t; ok += f; found = true; }
+      }
+      for (const k of Object.keys(x)) walk(x[k]);
+    };
+    walk(d);
+    return found ? { due, ok } : null;
+  }
+  // Tỷ lệ ODR thật (đơn giao xuôi ký nhận trong hạn / tổng đơn giao xuôi ký nhận) của 1 bưu cục 1 ngày, lấy trực tiếp từ Kanban (không phân biệt TikTok)
+  async function fetchOdrReal(code, date) {
+    const base = { siteCode: code, isSelfData: 0, isCargo: 0, isExpress: 0, nationCode: 'VN', statisticsDate: `${date} 00:00:00`, timeFrom: `${date}T00:00:00.000+07:00` };
+    const d = await apiPost(API_KB_SFT, base);
+    return sumOdrShift(d);
+  }
   function makeKbStore(factory) {
     let dbp = null;
     const open = () => dbp || (dbp = new Promise((res, rej) => {
@@ -2276,13 +2299,15 @@
     if (light) return { items, total, sum: null };   // chỉ cần danh sách đơn (số hôm nay để phân tích nguyên nhân, không lưu)
     const sum = await apiPost(API_KB_SUM, Object.assign({}, base, { timeFrom: `${date}T00:00:00.000+07:00` }));
     let srec = null; try { srec = await apiPost(API_KB_SREC, Object.assign({}, base, { timeFrom: `${date}T00:00:00.000+07:00` })); } catch (e) { if (isAuthError(e)) throw e; }
+    let odr = null; try { odr = sumOdrShift(await apiPost(API_KB_SFT, Object.assign({}, base, { timeFrom: `${date}T00:00:00.000+07:00` }))); } catch (e) { if (isAuthError(e)) throw e; }
     const g = k => ((sum && sum.groupIndicatorList) || []).find(x => x && x.dataKeyPrefix === k) || null;
     const one = k => { const x = ((sum && sum.singleIndicatorList) || []).find(y => y && y.dataKey === k); return x ? Number(x.value) : null; };
     const pod = g('2400Pod'), att = g('tryDispIncludStock'), sd = srec && srec.sdisp ? srec.sdisp : null;
     return { items, total, sum: {
       all: sum && Number.isFinite(Number(sum.topicIndicatorValue)) ? Number(sum.topicIndicatorValue) : null, newN: one('todayAddSdispCnt'),
       podOk: pod ? Number(pod.member) : null, podDen: pod ? Number(pod.denominator) : null, attOk: att ? Number(att.member) : null, attDen: att ? Number(att.denominator) : null,
-      newAttempt: sd ? Number(sd.attemptCnt) : null, newCnt: sd ? Number(sd.sdispCnt) : null, success: sd ? Number(sd.successCnt) : null
+      newAttempt: sd ? Number(sd.attemptCnt) : null, newCnt: sd ? Number(sd.sdispCnt) : null, success: sd ? Number(sd.successCnt) : null,
+      odrOk: odr ? odr.ok : null, odrDen: odr ? odr.due : null
     } };
   }
   // Đối chiếu danh sách đơn với số tổng của Kanban; trả về danh sách điểm lệch (rỗng = khớp) và số cuối ngày cho các chỉ số quét giao
@@ -2296,7 +2321,8 @@
     const fin = {
       total, unscanned: Number.isFinite(S.attOk) && Number.isFinite(S.attDen) ? S.attDen - S.attOk : null,
       ok: Number.isFinite(S.success) ? S.success : c.ok, newTotal: Number.isFinite(S.newCnt) ? S.newCnt : c.newN,
-      newUns: Number.isFinite(S.newAttempt) && Number.isFinite(S.newCnt) ? S.newCnt - S.newAttempt : null
+      newUns: Number.isFinite(S.newAttempt) && Number.isFinite(S.newCnt) ? S.newCnt - S.newAttempt : null,
+      odrOk: Number.isFinite(S.odrOk) ? S.odrOk : null, odrDen: Number.isFinite(S.odrDen) ? S.odrDen : null
     };
     return { bad, fin, check: c };
   }
@@ -2305,8 +2331,10 @@
   //  - bản lưu từ phiên bản cũ (v < 2): tải lại đúng một lần;
   //  - bản tải trong 6 giờ đầu sau khi ngày kết thúc (Kanban chưa chốt số cả ngày): tải lại sau mốc đó;
   //  - bản có từ 30 đơn trở lên mà không có đơn nào ký nhận (số cả ngày bằng 0): tải lại.
+  //  - v3.33: bản lưu từ trước khi có Tỷ lệ ODR thật (chưa có fin.odrDen): tải lại đúng một lần để lấy số ODR thật.
   function kbStale(rec, date, nowMs) {
     if (!rec || rec.v !== 2) return true;
+    if (!rec.fin || !Number.isFinite(rec.fin.odrDen)) return true;
     const end = kbDay0(date) + 86400000, settle = end + 6 * 3600000, f = Date.parse(rec.fetchedAt);
     if ((!Number.isFinite(f) || f < settle) && (nowMs ?? Date.now()) > settle) return true;
     try { const c = kbDayCheck(rec); if (c.all >= 30 && c.ok === 0) return true; } catch { return true; }
@@ -2753,9 +2781,13 @@
     return apiSave(name, t, items, total, diag);
   }
   async function apiSave(name, t, items, total, diag) {
-    const calc = computeDashboard({ orders: t.orders, emp: t.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now: new Date(), rules: state.dm, skip: shipSkipFn(name) });
+    const now = new Date();
+    const calc = computeDashboard({ orders: t.orders, emp: t.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now, rules: state.dm, skip: shipSkipFn(name) });
+    // v3.33: thay hẳn "Tỷ lệ ODR" cũ (tính từ cột thời hạn giao hàng nội bộ, chỉ TikTok) bằng Tỷ lệ ODR thật lấy trực tiếp từ Kanban (đơn giao xuôi ký nhận trong hạn / tổng đơn giao xuôi ký nhận, cộng Trip 1 + Trip 2, không riêng TikTok)
+    try { const site = await resolveSite(name); const odr = await fetchOdrReal(site.code, dateKey(now)); calc.extra.odr2 = (odr && odr.due > 0) ? odr : null; }
+    catch (e) { if (isAuthError(e)) throw e; calc.extra.odr2 = null; }
     const d = decideSave({ hasOrders: true, pageOffice: name, startOffice: name, expectedOffice: name, ovNeed: total, computedTotal: calc.cards.all.total, diag });
-    const rec = buildRecord({ office: canonOffice(name, OFFICES) || name, now: new Date(), calc, verified: !!d.verified });
+    const rec = buildRecord({ office: canonOffice(name, OFFICES) || name, now, calc, verified: !!d.verified });
     state.kb.sg.set(rec.office, { date: rec.date, at: Date.parse(rec.savedAt) || Date.now(), sg: signMinsOf(t.orders, state.statusMap, new Date()) });
     if (!d.save) { return { saved: false, reason: d.reason, rec: d.force ? rec : null }; }
     await putRecords([rec]);
@@ -2775,7 +2807,11 @@
       ovNeed: m ? parseNum(m[1]) : (state.ov && Number.isFinite(state.ov.need) ? state.ov.need : NaN), computedTotal: c ? c.cards.all.total : 0
     });
     if (!c) return { saved: false, reason: 'Chưa tính được số liệu từ bảng đơn.' };
-    const rec = d.reason && !d.force ? null : buildRecord({ office: canonOffice(pageOffice, OFFICES), now: new Date(), calc: c, verified: !!d.verified });
+    const now = new Date();
+    // v3.33: thay hẳn "Tỷ lệ ODR" cũ bằng Tỷ lệ ODR thật lấy từ Kanban (giống đường API)
+    try { const site = await resolveSite(pageOffice); const odr = await fetchOdrReal(site.code, dateKey(now)); c.extra.odr2 = (odr && odr.due > 0) ? odr : null; }
+    catch (e) { if (isAuthError(e)) throw e; c.extra.odr2 = null; }
+    const rec = d.reason && !d.force ? null : buildRecord({ office: canonOffice(pageOffice, OFFICES), now, calc: c, verified: !!d.verified });
     if (d.save && rec) {
       try {
         await putRecords([rec]);
@@ -3002,6 +3038,8 @@
    * Tab ANM: so sánh nhiều bưu cục (đọc từ lịch sử đã lưu)
    * ------------------------------------------------------------------ */
   const pct2 = v => v.toLocaleString('vi-VN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const API_SITE_TREE = '/v9-site/site/getAllChildSites';
+  // Trang COD dùng mã bưu cục riêng, khác mã của API tìm bưu cục. Thứ tự: mã đã học > mã đã xác nhận > mã của API tìm bưu cục (đoán)
   const COD_IDS_BUILTIN = {};
   function codIds() {
     const m = {}; for (const [k, v] of Object.entries(COD_IDS_BUILTIN)) m[plain(k)] = v;
@@ -3012,6 +3050,7 @@
     try { const o = JSON.parse(localStorage.getItem('b8s_codsites') || '{}') || {}; localStorage.setItem('b8s_codsites', JSON.stringify(Object.assign(o, learned))); } catch { /* bỏ qua */ }
   }
   const isFS = o => /^\s*fs(\s|$)/i.test(String(o ?? ''));   // bưu cục FS không theo dõi COD
+  const isDS = o => /^\s*ds(\s|$)/i.test(String(o ?? ''));   // bản chia sẻ: COD chỉ lấy đúng bưu cục có tên bắt đầu bằng "DS"
   const API_PU_DET = '/v9-order/dc/kanban/am/get-srec-detail';
   const PU_KEEP = 75, PU_TODAY_MS = 8 * 60000, PU_RETRY_MS = 300000, PU_WORKERS = 3;
   const PU_TH = { good: 95, warn: 85 };
