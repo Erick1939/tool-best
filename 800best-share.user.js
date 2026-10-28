@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         800BEST - Thống kê tổng quan & Shipper (bản chia sẻ)
 // @namespace    local.800best.report.share
-// @version      3.34.0
-// @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ.
+// @version      3.35.0
+// @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ. v3.35: đổi công thức "Tỷ lệ ODR" — bỏ hẳn cách lấy số có sẵn từ Kanban (v3.33), giờ tự tính từ cột "Thời hạn giao hàng của đối tác" (field customerAgingDate) trong bảng đơn: (đơn đã tới hạn giao mà giao thành công + đơn CHƯA tới hạn mà đã giao thành công sớm) / (tổng đơn đã tới hạn + đơn chưa tới hạn mà đã giao thành công sớm), tính cho TOÀN BỘ đơn (không riêng TikTok); đường API (Tải nhanh) đã lấy sẵn field này nên không cần sửa gì thêm. Thẻ "TikTok đến hạn ODR" (đếm số đơn, dựa cột nội bộ, riêng TikTok) giữ nguyên không đổi.
 // @match        https://v9.800best.com/sea-web/*
 // @run-at       document-start
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
@@ -56,7 +56,7 @@
    *   enabled (bật/tắt), minVersion, pwVer (đổi số này = mọi người phải nhập lại), kdf (salt, iter), payloadVer, graceDays, msg.
    * Chỉ đọc 2 file công khai trên GitHub; KHÔNG gửi bất kỳ dữ liệu nào của người dùng đi đâu.
    * ------------------------------------------------------------------ */
-  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.34.0', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
+  const LK = { user: 'Erick1939', repo: 'tool-best', branch: 'main', ver: '3.34.1', updateUrl: 'https://raw.githubusercontent.com/Erick1939/tool-best/main/800best-share.user.js', graceDefault: 3, SKEW: 600000, RECHECK: 1800000, MAXFAIL: 5 };
   const lkS = { st: 'init', msg: '', busy: false, status: null, fails: 0, wait: 0, diag: '', checkedAt: 0 };   // st: init | checking | locked | blocked | error | open
   const lkNoop = () => undefined, lkResolved = () => Promise.resolve();
   const lkB64d = s => Uint8Array.from(atob(String(s)), c => c.charCodeAt(0));
@@ -477,9 +477,9 @@
       if (!st) { st = `Trạng thái ${code}`; unknown.add(code); }
       const signMs = code === '4' ? signMsOf(it) : null;
       if (code === '4') { okN++; if (signMs !== null) signN++; }
-      rows.push([wb, msDMY(it.predictTimeByDeparture), st, String(it.latestScanMan || '').trim(), msDMY(it.forwardAgingEndDate), signMs !== null ? msDMYHMS(signMs) : '']);
+      rows.push([wb, msDMY(it.predictTimeByDeparture), st, String(it.latestScanMan || '').trim(), msDMY(it.forwardAgingEndDate), signMs !== null ? msDMYHMS(signMs) : '', msDMY(it.customerAgingDate)]);
     }
-    const orders = { headers: ['Mã vận đơn', 'Ngày cần phát hàng', 'Trạng thái đơn hàng', 'Người quét mới nhất', 'Thời hạn giao hàng nội bộ', 'Giờ giao thành công'], rows, wbCol: 0 };
+    const orders = { headers: ['Mã vận đơn', 'Ngày cần phát hàng', 'Trạng thái đơn hàng', 'Người quét mới nhất', 'Thời hạn giao hàng nội bộ', 'Giờ giao thành công', 'Thời hạn giao hàng của đối tác'], rows, wbCol: 0 };
     const eRows = (empList || []).map(e => {
       const c = codeById.get(e.dispDelivererId);
       return [`${String(e.delivererName || '').trim()}${c ? `(${c})` : ''}`, e.shouldDispCount ?? 0, e.todayDispCount ?? 0, msDMYHMS(e.firstDispScanTime), e.signCount ?? 0, String(e.departmentName ?? '').trim()];
@@ -504,6 +504,15 @@
     // Nếu không có cột ngày thì dùng cột “Quá thời hạn giao hàng nội bộ” = 0 (đến hạn đúng hôm nay)
     let xCol = -1;
     if (oCol < 0) xCol = H.findIndex(h => /quá\s*thời\s*(hạn|gian).*nội\s*bộ/i.test(h));
+    // Cột “Thời hạn giao hàng của đối tác” (v3.35, dùng để tính Tỷ lệ ODR): ưu tiên tìm theo tên; nếu không đọc được tiêu đề thì suy ra từ cột ngày nằm ngay trước “Quá thời hạn giao hàng của đối tác”
+    let pCol = H.findIndex(h => /thời\s*(hạn|gian).*(của\s*)?đối\s*tác/i.test(h) && !/quá|còn lại|chênh/i.test(h));
+    if (pCol < 0) {
+      const q = H.findIndex(h => /quá\s*thời\s*(hạn|gian).*đối\s*tác/i.test(h));
+      if (q > 0 && looksDate(q - 1)) pCol = q - 1;
+    }
+    // Không có cột ngày thì dùng cột text “Quá/Còn … thời hạn giao hàng của đối tác”: “Quá” = đã tới hạn, “Còn” = chưa tới hạn
+    let pxCol = -1;
+    if (pCol < 0) pxCol = H.findIndex(h => /quá\s*thời\s*(hạn|gian).*đối\s*tác|thời\s*(hạn|gian).*đối\s*tác.*(quá|còn)/i.test(h));
     const tCol = colBy(H, /giờ giao thành công/i);
     const bl = { total: 0, wait: 0, fail: 0, unscanned: 0, d5: 0 };
     let odr = 0, firstOk = null;
@@ -545,8 +554,17 @@
         else if (cat === 'unscanned') bl.unscanned++;
       }
       // TikTok đến hạn ODR: thời hạn giao hàng nội bộ là hôm nay
-      if (isTT && oCol >= 0 && isToday(r[oCol], now)) { odr++; odr2.due++; if (cat === 'ok') odr2.ok++; }
-      else if (isTT && oCol < 0 && xCol >= 0) { const m = String(r[xCol] ?? '').match(/\d+/); if (m && +m[0] === 0 && !/^-/.test(String(r[xCol]).trim())) { odr++; odr2.due++; if (cat === 'ok') odr2.ok++; } }
+      if (isTT && oCol >= 0 && isToday(r[oCol], now)) { odr++; }
+      else if (isTT && oCol < 0 && xCol >= 0) { const m = String(r[xCol] ?? '').match(/\d+/); if (m && +m[0] === 0 && !/^-/.test(String(r[xCol]).trim())) { odr++; } }
+      // v3.35: Tỷ lệ ODR = (đơn tới hạn giao hàng CỦA ĐỐI TÁC đã giao thành công + đơn CHƯA tới hạn mà đã giao thành công sớm)
+      // / (tổng đơn tới hạn + đơn chưa tới hạn mà đã giao thành công sớm) — tính cho TOÀN BỘ đơn (không riêng TikTok)
+      {
+        let due = null;   // true = đã tới hạn (hạn <= hôm nay), false = chưa tới hạn, null = không xác định được
+        if (pCol >= 0) { const db = daysBefore(r[pCol], now); if (db !== null) due = db >= 0; }
+        else if (pxCol >= 0) { const s = String(r[pxCol] ?? '').trim(); if (/quá/i.test(s)) due = true; else if (/còn/i.test(s)) due = false; }
+        if (due === true) { odr2.due++; if (cat === 'ok') odr2.ok++; }
+        else if (due === false && cat === 'ok') { odr2.due++; odr2.ok++; }
+      }
       // Đơn đã quét giao được tính cho người quét mới nhất
       if (cat !== 'unscanned' && scCol >= 0) {
         const o = getStat(r[scCol]);
@@ -612,6 +630,7 @@
     if (stCol < 0) notes.push('Không thấy cột “Trạng thái” trong bảng đơn nên chưa phân loại được thành công/chưa quét.');
     if (dCol < 0) notes.push('Không thấy cột “Ngày cần phát hàng” trong bảng đơn nên chưa tính được POD2400 và Backlog 3 ngày.');
     if (oCol < 0 && xCol < 0) notes.push('Không thấy cột “Thời hạn giao hàng nội bộ” trong bảng đơn nên chưa tính được TikTok đến hạn ODR.');
+    if (pCol < 0 && pxCol < 0) notes.push('Không thấy cột “Thời hạn giao hàng của đối tác” trong bảng đơn nên chưa tính được Tỷ lệ ODR.');
     if (scCol < 0) notes.push('Không thấy cột “Người quét” trong bảng đơn nên chưa tách được theo shipper.');
     if (W && W.note) notes.push(W.note);
     if (W && DM.on) {
@@ -2783,9 +2802,7 @@
   async function apiSave(name, t, items, total, diag) {
     const now = new Date();
     const calc = computeDashboard({ orders: t.orders, emp: t.emp, tiktok: parseList(state.tiktok), statusMap: state.statusMap, now, rules: state.dm, skip: shipSkipFn(name) });
-    // v3.33: thay hẳn "Tỷ lệ ODR" cũ (tính từ cột thời hạn giao hàng nội bộ, chỉ TikTok) bằng Tỷ lệ ODR thật lấy trực tiếp từ Kanban (đơn giao xuôi ký nhận trong hạn / tổng đơn giao xuôi ký nhận, cộng Trip 1 + Trip 2, không riêng TikTok)
-    try { const site = await resolveSite(name); const odr = await fetchOdrReal(site.code, dateKey(now)); calc.extra.odr2 = (odr && odr.due > 0) ? odr : null; }
-    catch (e) { if (isAuthError(e)) throw e; calc.extra.odr2 = null; }
+    // v3.35: Tỷ lệ ODR giờ tính thẳng từ cột “Thời hạn giao hàng của đối tác” trong computeDashboard (calc.extra.odr2) — không gọi Kanban nữa.
     const d = decideSave({ hasOrders: true, pageOffice: name, startOffice: name, expectedOffice: name, ovNeed: total, computedTotal: calc.cards.all.total, diag });
     const rec = buildRecord({ office: canonOffice(name, OFFICES) || name, now, calc, verified: !!d.verified });
     state.kb.sg.set(rec.office, { date: rec.date, at: Date.parse(rec.savedAt) || Date.now(), sg: signMinsOf(t.orders, state.statusMap, new Date()) });
@@ -2808,9 +2825,7 @@
     });
     if (!c) return { saved: false, reason: 'Chưa tính được số liệu từ bảng đơn.' };
     const now = new Date();
-    // v3.33: thay hẳn "Tỷ lệ ODR" cũ bằng Tỷ lệ ODR thật lấy từ Kanban (giống đường API)
-    try { const site = await resolveSite(pageOffice); const odr = await fetchOdrReal(site.code, dateKey(now)); c.extra.odr2 = (odr && odr.due > 0) ? odr : null; }
-    catch (e) { if (isAuthError(e)) throw e; c.extra.odr2 = null; }
+    // v3.35: Tỷ lệ ODR giờ tính thẳng từ cột “Thời hạn giao hàng của đối tác” trong computeDashboard (c.extra.odr2) — không gọi Kanban nữa.
     const rec = d.reason && !d.force ? null : buildRecord({ office: canonOffice(pageOffice, OFFICES), now, calc: c, verified: !!d.verified });
     if (d.save && rec) {
       try {
