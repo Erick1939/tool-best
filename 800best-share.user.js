@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         800BEST - Thống kê tổng quan & Shipper (bản chia sẻ)
 // @namespace    local.800best.report.share
-// @version      3.35.0
-// @description  Dashboard hub 800BEST: quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD. v3.19: so sánh hôm qua / tuần trước lấy trực tiếp từ Kanban (cùng giờ, đối chiếu tổng Kanban trước khi dùng, đệm gọn), quét giao/chưa quét/GTC so số chốt cuối ngày, POD hiển thị 2 số thập phân, bỏ AI dự báo, xu hướng 7 ngày, mốc giờ. v3.35: đổi công thức "Tỷ lệ ODR" — bỏ hẳn cách lấy số có sẵn từ Kanban (v3.33), giờ tự tính từ cột "Thời hạn giao hàng của đối tác" (field customerAgingDate) trong bảng đơn: (đơn đã tới hạn giao mà giao thành công + đơn CHƯA tới hạn mà đã giao thành công sớm) / (tổng đơn đã tới hạn + đơn chưa tới hạn mà đã giao thành công sớm), tính cho TOÀN BỘ đơn (không riêng TikTok); đường API (Tải nhanh) đã lấy sẵn field này nên không cần sửa gì thêm. Thẻ "TikTok đến hạn ODR" (đếm số đơn, dựa cột nội bộ, riêng TikTok) giữ nguyên không đổi.
+// @version      3.36.0
+// @description  Dashboard hub 800BEST (bản chia sẻ Laptop/ANM): quét giao, POD2400, backlog, TikTok Shop, tiến độ shipper, bảng xếp hạng thi đua, COD, phân tích nguyên nhân POD, Tỷ lệ ODR; so sánh hôm qua/tuần trước lấy trực tiếp từ Kanban cùng giờ.
 // @match        https://v9.800best.com/sea-web/*
 // @run-at       document-start
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
@@ -556,12 +556,19 @@
       // TikTok đến hạn ODR: thời hạn giao hàng nội bộ là hôm nay
       if (isTT && oCol >= 0 && isToday(r[oCol], now)) { odr++; }
       else if (isTT && oCol < 0 && xCol >= 0) { const m = String(r[xCol] ?? '').match(/\d+/); if (m && +m[0] === 0 && !/^-/.test(String(r[xCol]).trim())) { odr++; } }
-      // v3.35: Tỷ lệ ODR = (đơn tới hạn giao hàng CỦA ĐỐI TÁC đã giao thành công + đơn CHƯA tới hạn mà đã giao thành công sớm)
-      // / (tổng đơn tới hạn + đơn chưa tới hạn mà đã giao thành công sớm) — tính cho TOÀN BỘ đơn (không riêng TikTok)
+      // Tỷ lệ ODR (toàn bộ đơn, không riêng TikTok): đơn đến hạn đúng hôm nay + đơn chưa tới hạn
+      // giao thành công sớm, trên tổng tương ứng. Đơn đã quá hạn mà chưa giao thì loại khỏi công thức.
       {
-        let due = null;   // true = đã tới hạn (hạn <= hôm nay), false = chưa tới hạn, null = không xác định được
-        if (pCol >= 0) { const db = daysBefore(r[pCol], now); if (db !== null) due = db >= 0; }
-        else if (pxCol >= 0) { const s = String(r[pxCol] ?? '').trim(); if (/quá/i.test(s)) due = true; else if (/còn/i.test(s)) due = false; }
+        let due = null;
+        if (pCol >= 0) {
+          const db = daysBefore(r[pCol], now);
+          if (db !== null) due = db === 0 ? true : (db < 0 ? false : null);
+        } else if (pxCol >= 0) {
+          const s = String(r[pxCol] ?? '').trim();
+          if (/quá/i.test(s)) due = null;
+          else if (/còn/i.test(s)) due = false;
+          else if (/(đúng\s*hạn|hôm\s*nay)/i.test(s)) due = true;
+        }
         if (due === true) { odr2.due++; if (cat === 'ok') odr2.ok++; }
         else if (due === false && cat === 'ok') { odr2.due++; odr2.ok++; }
       }
